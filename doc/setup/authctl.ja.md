@@ -79,6 +79,33 @@ lore-authctl --config "$CONFIG" user add \
   --name "Manual User"
 ```
 
+## user bind-identity
+
+IdP が確認済み email を返さない場合は、管理者が IdP subject を user に明示的に結び付けます。
+対象の IdP account を管理画面で確認したうえで実行してください。
+
+Entra の `entra_oid_tid` では subject は `<tenant-id>:<object-id>` です。
+
+```bash
+lore-authctl --config "$CONFIG" user bind-identity \
+  --idp entra \
+  --email alice@example.com \
+  --subject "tenant-id:object-id"
+```
+
+同じ binding の再実行は安全です。別 user に結び付いた subject は拒否されます。
+
+複数ユーザーを運用する場合は、`scripts/onboard-entra-user.sh` で account 作成、binding、任意の repository grant をまとめて実行できます。
+
+```bash
+scripts/onboard-entra-user.sh \
+  --email alice@example.com \
+  --name "Alice Example" \
+  --object-id "object-id-from-entra" \
+  --repo gamestudio/sandbox \
+  --role writer
+```
+
 ## user list
 
 ```bash

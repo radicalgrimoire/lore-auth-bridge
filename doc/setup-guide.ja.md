@@ -26,6 +26,9 @@ Google OIDC は、この文書セットで扱う具体例の一つです。
 - [TLS](setup/tls.ja.md)
 - [Signing Keys](setup/signing-keys.ja.md)
 - [Loreserver](setup/loreserver.ja.md)
+- [Lore Server と Entra 認証付き bridge の構築](setup/on-prem-entra-lore-server.ja.md)
+- [Entra ID 連携の変更根拠と検証記録](setup/entra-id-integration-evidence.ja.md)
+- [Entra ID 対応: bridge 更新履歴と根拠](setup/entra-id-bridge-update-history.ja.md)
 - [Authctl](setup/authctl.ja.md)
 - [管理 Web UI](setup/admin-ui.ja.md)
 

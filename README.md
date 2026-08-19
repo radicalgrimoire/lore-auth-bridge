@@ -10,6 +10,10 @@ Sharing a Lore server with a team raises a question that Lore leaves to an exter
 
 Under the hood, it is a single Rust service that implements Lore's UCS Auth / ReBAC protocol: OIDC login, repository-scoped token exchange, JWKS publication, and repository lifecycle synchronization, backed by SQLite and a ReBAC authorization engine.
 
+## radicalgrimoire-maintained Entra ID changes
+
+The `radicalgrimoire` fork includes Entra ID identity-binding onboarding changes. Their scope, rationale, and validation record are available in Japanese: [Entra ID bridge update history and rationale](doc/setup/entra-id-bridge-update-history.ja.md) and [Entra ID integration rationale and validation record](doc/setup/entra-id-integration-evidence.ja.md).
+
 ## What Is This / How It Fits
 
 In one sentence: the bridge is the auth service standing between three parties — the **browser** where people log in, the **lore CLI** that uses tokens, and **`loreserver`** that verifies them.

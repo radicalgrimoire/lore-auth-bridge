@@ -380,6 +380,41 @@ impl AccountDirectory for AuditedStore {
     }
 }
 
+impl AuditedStore {
+    pub async fn bind_external_identity(
+        &self,
+        identity: model::ExternalIdentity,
+    ) -> CoreResult<model::ExternalIdentity> {
+        let actor = self.actor.clone();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let identity = Store::bind_external_identity_conn(&tx, identity)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.bind_identity",
+                        "user",
+                        identity.user_id.clone(),
+                        format!(
+                            "provider_id={} issuer={} subject={}",
+                            identity.provider_id, identity.issuer, identity.subject
+                        ),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(identity)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+}
+
 #[async_trait]
 impl ResourceStore for AuditedStore {
     async fn upsert(&self, resource: Resource) -> CoreResult<()> {

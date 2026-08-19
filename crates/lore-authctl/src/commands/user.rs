@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use lore_auth_core::{
-    model::{AddInvitationInput, AddUserInput, UserListFilter},
+    model::{AddInvitationInput, AddUserInput, ExternalIdentity, UserListFilter},
     ports::{AccountDirectory, AccountQuery},
 };
 
@@ -39,6 +39,29 @@ pub(crate) async fn run(config_path: &Path, db: Option<&Path>, command: UserComm
                 .await
                 .map_err(core_error)?;
             println!("{}\t{}\t{}", user.id, value(&user.email), user.status);
+        }
+        UserCommand::BindIdentity(args) => {
+            let (provider_id, issuer) =
+                resolve_user_idp(&env.cfg, Some(&args.idp), "", "")?;
+            let provider = env
+                .cfg
+                .identity_providers
+                .providers
+                .get(&provider_id)
+                .expect("configured provider");
+            let identity = audited
+                .bind_external_identity(ExternalIdentity {
+                    provider_id,
+                    issuer,
+                    subject: args.subject,
+                    subject_strategy: provider.subject.strategy.clone(),
+                    email: args.email.clone(),
+                    status: "active".to_owned(),
+                    ..ExternalIdentity::default()
+                })
+                .await
+                .map_err(core_error)?;
+            println!("{}\t{}\t{}", identity.user_id, identity.subject, identity.status);
         }
         UserCommand::List => {
             for user in env

@@ -10,6 +10,10 @@ Lore サーバをチームで共有しようとすると、Lore が外部サー�
 
 実装は、Lore の UCS Auth / ReBAC protocol を実装する単一の Rust サービスです。OIDC ログイン、repository 単位の token exchange、JWKS 配信、repository lifecycle の同期を提供し、SQLite と ReBAC 認可エンジンの上で動作します。
 
+## radicalgrimoire が保守する Entra ID 対応
+
+`radicalgrimoire` の fork には、Entra ID の identity binding onboarding に関する変更が含まれます。変更範囲と根拠は [Entra ID 対応: bridge 更新履歴と根拠](doc/setup/entra-id-bridge-update-history.ja.md)、設計判断と実機検証は [Entra ID 連携の変更根拠と検証記録](doc/setup/entra-id-integration-evidence.ja.md) を参照してください。
+
 ## これは何か / どう接続するか
 
 一言でいえば、bridge は 3 つの相手 — ログインする **Browser**、token を使う **lore CLI**、それを検証する **`loreserver`** — の間に立つ認証サービスです。

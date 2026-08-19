@@ -24,6 +24,68 @@ use super::{
 };
 
 impl Store {
+    pub(super) fn bind_external_identity_conn(
+        conn: &rusqlite::Connection,
+        mut identity: ExternalIdentity,
+    ) -> CoreResult<ExternalIdentity> {
+        let user_id = resolve_user_id_conn(conn, &identity.email)?;
+        let user = user_by_id_conn(conn, &user_id)?;
+        active_user(&user)?;
+        identity.provider_id = identity.provider_id.trim().to_owned();
+        identity.issuer = identity.issuer.trim().to_owned();
+        identity.subject = identity.subject.trim().to_owned();
+        identity.subject_strategy = identity.subject_strategy.trim().to_owned();
+        if identity.provider_id.is_empty()
+            || identity.issuer.is_empty()
+            || identity.subject.is_empty()
+            || identity.subject_strategy.is_empty()
+        {
+            return Err(CoreError::InvalidArgument(
+                "provider_id, issuer, subject, and subject_strategy are required".to_owned(),
+            ));
+        }
+        let existing = conn
+            .query_row(
+                "SELECT id, user_id, provider_id, issuer, subject, subject_strategy,
+                        email, email_verified, display_name, picture_url, hosted_domain, status
+                 FROM external_identities
+                 WHERE provider_id = ?1 AND issuer = ?2 AND subject = ?3",
+                params![identity.provider_id, identity.issuer, identity.subject],
+                external_identity_from_row,
+            )
+            .optional()
+            .map_err(core_from_sql)?;
+        if let Some(existing) = existing {
+            if existing.user_id == user_id && existing.status == "active" {
+                return Ok(existing);
+            }
+            return Err(CoreError::InvalidArgument(
+                "external identity is already bound to another user or is inactive".to_owned(),
+            ));
+        }
+        identity.id = new_id();
+        identity.user_id = user_id;
+        identity.email = user.email;
+        identity.status = "active".to_owned();
+        let now = unix_now();
+        conn.execute(
+            "INSERT INTO external_identities (
+               id, user_id, provider_id, issuer, subject, subject_strategy,
+               email, email_verified, display_name, picture_url, hosted_domain,
+               status, first_seen_at, last_seen_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                identity.id, identity.user_id, identity.provider_id, identity.issuer,
+                identity.subject, identity.subject_strategy, none_if_empty(&identity.email),
+                bool_to_i64(identity.email_verified), none_if_empty(&identity.display_name),
+                none_if_empty(&identity.picture_url), none_if_empty(&identity.hosted_domain),
+                identity.status, now, now
+            ],
+        )
+        .map_err(core_from_sql)?;
+        Ok(identity)
+    }
+
     pub async fn resolve_user(&self, email_or_id: &str) -> CoreResult<User> {
         let email_or_id = email_or_id.to_owned();
         self.conn

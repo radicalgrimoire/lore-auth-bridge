@@ -1,0 +1,9 @@
+[environment.endpoint]
+auth_url = "https://127.0.0.1:8081"
+
+[server.auth]
+jwt_issuer = "http://127.0.0.1:8080"
+jwt_audience = ["lore-service", "127.0.0.1"]
+
+[server.auth.jwk]
+endpoint = "http://127.0.0.1:8080/.well-known/jwks.json"

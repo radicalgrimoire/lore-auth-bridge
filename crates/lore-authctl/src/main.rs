@@ -93,6 +93,11 @@ pub(crate) enum UserCommand {
         after_help = "This command is an escape hatch for pre-provisioning or deployments that use a subject strategy without email binding."
     )]
     Add(UserAdd),
+    #[command(
+        about = "Bind a configured IdP subject to an existing user",
+        after_help = "For Entra's entra_oid_tid strategy, pass --subject as <tenant-id>:<object-id>."
+    )]
+    BindIdentity(UserBindIdentity),
     List,
     Disable(UserDisable),
     Enable(UserEnable),
@@ -104,6 +109,16 @@ pub(crate) struct UserAdd {
     pub(crate) email: String,
     #[arg(long, default_value = "")]
     pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UserBindIdentity {
+    #[arg(long)]
+    pub(crate) idp: String,
+    #[arg(long)]
+    pub(crate) email: String,
+    #[arg(long)]
+    pub(crate) subject: String,
 }
 
 #[derive(Debug, Args)]
