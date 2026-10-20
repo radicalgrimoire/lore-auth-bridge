@@ -43,6 +43,7 @@ struct State {
     groups: HashMap<String, Group>,
     group_members: HashMap<String, Vec<String>>,
     group_groups: HashMap<String, Vec<String>>,
+    group_network_cidrs: HashMap<String, Vec<String>>,
     auth_sessions: HashMap<String, AuthSession>,
     auth_session_codes: HashMap<String, String>,
     login_states: HashMap<String, LoginState>,

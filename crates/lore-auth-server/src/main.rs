@@ -107,7 +107,14 @@ async fn run(cli: Cli) -> Result<()> {
                 })
                 .into_service(),
             )
-            .add_service(RebacServer::new(graph.resources.clone()).into_service())
+            .add_service(
+                RebacServer::new(
+                    graph.resources.clone(),
+                    graph.tokens.clone(),
+                    cfg.admin.admin_emails.clone(),
+                )
+                .into_service(),
+            )
             .serve_with_shutdown(grpc_addr, grpc_shutdown)
             .await
             .context("gRPC server")
@@ -186,6 +193,7 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
         },
         idps,
         accounts.clone(),
+        groups.clone(),
         state_store.clone(),
         tokens.clone(),
     ));

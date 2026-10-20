@@ -185,6 +185,40 @@ impl AccountDirectory for Store {
             .map_err(core_from_driver)
     }
 
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> CoreResult<TokenPrincipal> {
+        let jti = jti.to_owned();
+        let resource_id = resource_id.to_owned();
+        self.conn
+            .call(move |conn| {
+                let user = conn
+                    .query_row(
+                        "SELECT u.id, u.primary_email, u.display_name, u.status,
+                                COALESCE(u.last_login_at, 0)
+                         FROM issued_tokens it
+                         JOIN users u ON u.id = it.user_id
+                         WHERE it.jti = ?1
+                           AND it.token_kind = 'authz'
+                           AND it.lore_resource_id = ?2
+                           AND it.revoked_at IS NULL
+                           AND it.expires_at > ?3
+                           AND u.status = 'active'",
+                        params![jti, resource_id, unix_now()],
+                        user_from_row,
+                    )
+                    .optional()
+                    .map_err(core_from_sql)?
+                    .ok_or(CoreError::NotFound)?;
+                let groups = group_names_conn(conn, &user.id)?;
+                Ok(principal_from_user(&user, BRIDGE_PROVIDER_ID, groups))
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn add_user(&self, input: AddUserInput) -> CoreResult<User> {
         self.conn
             .call(move |conn| add_user_conn(conn, input))

@@ -45,12 +45,23 @@ impl TokenSigner for Store {
         let jti = crate::ensure_jti(input.jti);
         let issued_at = unix_or_now(input.now);
         let expires_at = issued_at + seconds_or_default(input.ttl, 15 * 60);
-        let token = format!("authz:{}:{}", input.subject, uuid::Uuid::new_v4());
         let (lore_resource_id, permissions) = input
             .resources
             .first()
             .map(|resource| (resource.resource_id.clone(), resource.permission.clone()))
             .unwrap_or_default();
+        let token = format!("authz:{}:{}", input.subject, uuid::Uuid::new_v4());
+        self.lock().tokens.insert(
+            token.clone(),
+            VerifiedToken {
+                subject: input.subject,
+                jti: jti.clone(),
+                idp: input.idp,
+                expires_at,
+                audience: input.audience.clone(),
+                raw_claims: Vec::new(),
+            },
+        );
         Ok(SignedToken {
             token,
             jti,

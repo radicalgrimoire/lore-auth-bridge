@@ -139,6 +139,7 @@ async fn get_auth_session_token_issue_failure_is_internal() {
         Arc::new(lore_auth_adapters::idpregistry::Registry::default()),
         store.clone(),
         store.clone(),
+        store.clone(),
         failing_tokens.clone(),
     ));
     let server = UrcAuthServer::new(Services {
@@ -236,6 +237,57 @@ async fn exchange_flow_mints_resource_token_and_lookup_permissions() {
 }
 
 #[tokio::test]
+async fn get_user_info_resolves_users_for_matching_resource_token() {
+    let (server, store, token_service) = new_test_server();
+    let user = add_alice(&store);
+    let resource = add_game_assets(&store);
+    store.grant(&user.id, &resource.resource_id);
+    let (authn, _) = token_service
+        .mint_authn(&user.id, None)
+        .await
+        .expect("mint authn token");
+    let authz = server
+        .exchange_user_token_for_multiresource_token(auth_request(
+            ExchangeUserTokenForMultiresourceTokenRequest {
+                resource_id: vec![resource.resource_id.clone()],
+            },
+            &authn.token,
+        ))
+        .await
+        .expect("exchange authz token")
+        .into_inner()
+        .token
+        .expect("authz token");
+
+    let response = server
+        .get_user_info(auth_request(
+            GetUserInfoRequest {
+                resource_id: resource.resource_id.clone(),
+                user_id: vec![user.bridge_subject()],
+            },
+            &authz.user_token,
+        ))
+        .await
+        .expect("resolve user info")
+        .into_inner();
+    assert_eq!(response.user_info.len(), 1);
+    assert_eq!(response.user_info[0].user_id, user.bridge_subject());
+    assert_eq!(response.user_info[0].display_name, "Alice");
+
+    let err = server
+        .get_user_info(auth_request(
+            GetUserInfoRequest {
+                resource_id: "urc-other".to_owned(),
+                user_id: vec![user.bridge_subject()],
+            },
+            &authz.user_token,
+        ))
+        .await
+        .expect_err("mismatched resource must be rejected");
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
 async fn exchange_requires_bearer_and_resource_id() {
     let (server, _, _) = new_test_server();
 
@@ -297,6 +349,7 @@ async fn exchange_internal_token_issue_failure_is_internal() {
         login: Arc::new(LoginService::new(
             login_config(),
             Arc::new(lore_auth_adapters::idpregistry::Registry::default()),
+            store.clone(),
             store.clone(),
             store.clone(),
             issuing_tokens.clone(),
@@ -409,9 +462,9 @@ async fn go_unimplemented_auth_methods_return_unimplemented() {
                 user_id: Vec::new(),
             }))
             .await
-            .expect_err("get user info is not implemented in Go server")
+            .expect_err("get user info requires an authorization token")
             .code(),
-        Code::Unimplemented
+        Code::Unauthenticated
     );
     assert_eq!(
         server
@@ -449,6 +502,7 @@ fn new_test_server() -> (UrcAuthServer, Arc<memory::Store>, Arc<TokenService>) {
     let login = Arc::new(LoginService::new(
         login_config(),
         Arc::new(lore_auth_adapters::idpregistry::Registry::default()),
+        store.clone(),
         store.clone(),
         store.clone(),
         tokens.clone(),

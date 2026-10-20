@@ -6,7 +6,8 @@ use anyhow::Result;
 use lore_auth_core::ports::{GroupAdmin, GroupQuery};
 
 use crate::{
-    GroupCommand, GroupMemberCommand, GroupNestCommand, authctl_actor, core_error, open_env,
+    GroupCommand, GroupMemberCommand, GroupNestCommand, GroupNetworkCidrCommand, authctl_actor,
+    core_error, open_env,
 };
 
 pub(crate) async fn run(
@@ -59,6 +60,32 @@ pub(crate) async fn run(
                     .await
                     .map_err(core_error)?;
                 println!("ok");
+            }
+        },
+        GroupCommand::NetworkCidr { command } => match command {
+            GroupNetworkCidrCommand::Add(args) => {
+                groups
+                    .add_group_allowed_cidr(&args.group, &args.cidr)
+                    .await
+                    .map_err(core_error)?;
+                println!("ok");
+            }
+            GroupNetworkCidrCommand::Remove(args) => {
+                groups
+                    .remove_group_allowed_cidr(&args.group, &args.cidr)
+                    .await
+                    .map_err(core_error)?;
+                println!("ok");
+            }
+            GroupNetworkCidrCommand::List(args) => {
+                for cidr in env
+                    .store
+                    .list_group_allowed_cidrs(&args.group)
+                    .await
+                    .map_err(core_error)?
+                {
+                    println!("{cidr}");
+                }
             }
         },
     }

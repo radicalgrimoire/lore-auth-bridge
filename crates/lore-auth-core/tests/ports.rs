@@ -81,6 +81,14 @@ impl AccountDirectory for NullPorts {
         Err(CoreError::NotFound)
     }
 
+    async fn principal_by_authz_token_jti(
+        &self,
+        _jti: &str,
+        _resource_id: &str,
+    ) -> Result<TokenPrincipal, CoreError> {
+        Err(CoreError::NotFound)
+    }
+
     async fn add_user(&self, _input: AddUserInput) -> Result<User, CoreError> {
         Err(CoreError::InvalidArgument("missing user".to_owned()))
     }
@@ -365,6 +373,14 @@ impl GroupAdmin for NullPorts {
     ) -> Result<(), CoreError> {
         Ok(())
     }
+
+    async fn add_group_allowed_cidr(&self, _group: &str, _cidr: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn remove_group_allowed_cidr(&self, _group: &str, _cidr: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -378,6 +394,14 @@ impl GroupQuery for NullPorts {
     }
 
     async fn list_group_groups(&self, _group: &str) -> Result<Vec<Group>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_group_allowed_cidrs(&self, _group: &str) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_user_allowed_cidrs(&self, _user_id: &str) -> Result<Vec<String>, CoreError> {
         Ok(Vec::new())
     }
 }

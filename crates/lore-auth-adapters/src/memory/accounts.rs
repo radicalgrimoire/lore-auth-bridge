@@ -162,6 +162,38 @@ impl AccountDirectory for Store {
         ))
     }
 
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> Result<TokenPrincipal, CoreError> {
+        let state = self.lock();
+        let issued = state
+            .issued_tokens
+            .get(jti)
+            .filter(|token| {
+                token.kind == "authz"
+                    && token.lore_resource_id == resource_id
+                    && token.expires_at > now_unix()
+                    && !token.user_id.is_empty()
+            })
+            .ok_or(CoreError::NotFound)?;
+        let user = state
+            .users
+            .get(&issued.user_id)
+            .filter(|user| user.status == "active")
+            .ok_or(CoreError::NotFound)?;
+        Ok(principal_from_user(
+            user,
+            "bridge",
+            state
+                .group_members
+                .get(&user.id)
+                .cloned()
+                .unwrap_or_default(),
+        ))
+    }
+
     async fn add_user(&self, input: AddUserInput) -> Result<User, CoreError> {
         let email = validated_account_email(&input.email)?;
         let user = User {

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ipnet::IpNet;
 use lore_auth_core::{
     CoreError,
     model::{
@@ -186,6 +187,47 @@ impl GroupAdmin for AuditedStore {
         ));
         Ok(())
     }
+
+    async fn add_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError> {
+        let cidr = normalize_group_cidr(cidr)?;
+        let mut state = self.inner.lock();
+        let group_id = resolve_group_id(&state, group)?.to_owned();
+        let cidrs = state.group_network_cidrs.entry(group_id).or_default();
+        if !cidrs.contains(&cidr) {
+            cidrs.push(cidr.clone());
+            cidrs.sort();
+        }
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "group.network_cidr.add",
+            "group",
+            group,
+            format!("cidr={cidr}"),
+        ));
+        Ok(())
+    }
+
+    async fn remove_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError> {
+        let cidr = normalize_group_cidr(cidr)?;
+        let mut state = self.inner.lock();
+        let group_id = resolve_group_id(&state, group)?.to_owned();
+        let cidrs = state
+            .group_network_cidrs
+            .get_mut(&group_id)
+            .ok_or(CoreError::NotFound)?;
+        let Some(index) = cidrs.iter().position(|candidate| candidate == &cidr) else {
+            return Err(CoreError::NotFound);
+        };
+        cidrs.remove(index);
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "group.network_cidr.remove",
+            "group",
+            group,
+            format!("cidr={cidr}"),
+        ));
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -201,6 +243,27 @@ impl GroupQuery for AuditedStore {
     async fn list_group_groups(&self, group: &str) -> Result<Vec<Group>, CoreError> {
         self.inner.list_group_groups(group).await
     }
+
+    async fn list_group_allowed_cidrs(&self, group: &str) -> Result<Vec<String>, CoreError> {
+        self.inner.list_group_allowed_cidrs(group).await
+    }
+
+    async fn list_user_allowed_cidrs(&self, user_id: &str) -> Result<Vec<String>, CoreError> {
+        self.inner.list_user_allowed_cidrs(user_id).await
+    }
+}
+
+fn normalize_group_cidr(value: &str) -> Result<String, CoreError> {
+    let value = value.trim();
+    if value.is_empty() || !value.contains('/') {
+        return Err(CoreError::InvalidArgument(
+            "CIDR must include an address and prefix length".to_owned(),
+        ));
+    }
+    value
+        .parse::<IpNet>()
+        .map(|cidr| cidr.trunc().to_string())
+        .map_err(|_| CoreError::InvalidArgument("CIDR is invalid".to_owned()))
 }
 
 #[async_trait]
@@ -305,6 +368,16 @@ impl AccountDirectory for AuditedStore {
 
     async fn principal_by_authn_token_jti(&self, jti: &str) -> Result<TokenPrincipal, CoreError> {
         self.inner.principal_by_authn_token_jti(jti).await
+    }
+
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> Result<TokenPrincipal, CoreError> {
+        self.inner
+            .principal_by_authz_token_jti(jti, resource_id)
+            .await
     }
 
     async fn add_user(&self, input: AddUserInput) -> Result<User, CoreError> {

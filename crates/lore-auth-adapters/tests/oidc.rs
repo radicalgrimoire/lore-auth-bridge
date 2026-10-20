@@ -96,6 +96,7 @@ async fn begin_auth_uses_discovered_authorization_endpoint() {
         "https://auth.example.com/auth/keycloak-prod/callback"
     );
     assert_eq!(values.get("response_type").unwrap(), "code");
+    assert_eq!(values.get("response_mode").unwrap(), "query");
     assert_eq!(values.get("scope").unwrap(), "openid email");
     assert_eq!(values.get("state").unwrap(), "state-123");
     assert_eq!(values.get("nonce").unwrap(), "nonce-123");

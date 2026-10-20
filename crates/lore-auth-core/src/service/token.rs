@@ -111,6 +111,53 @@ impl TokenService {
         })
     }
 
+    pub async fn verify_authz(
+        &self,
+        bearer: &str,
+        resource_id: &str,
+    ) -> Result<model::VerifiedAuthn, CoreError> {
+        let compact = bearer
+            .trim()
+            .strip_prefix("Bearer ")
+            .unwrap_or(bearer)
+            .trim();
+        if compact.is_empty() || resource_id.is_empty() {
+            return Err(CoreError::Unauthenticated);
+        }
+        let audience = self
+            .cfg
+            .audience
+            .first()
+            .ok_or(CoreError::Unauthenticated)?;
+        let verified = self
+            .signer
+            .verify(
+                compact,
+                model::VerifyOptions {
+                    issuer: self.cfg.issuer.clone(),
+                    audience: audience.clone(),
+                },
+            )
+            .await
+            .map_err(|_| CoreError::Unauthenticated)?;
+        if verified.jti.is_empty() {
+            return Err(CoreError::Unauthenticated);
+        }
+        let principal = self
+            .accounts
+            .principal_by_authz_token_jti(&verified.jti, resource_id)
+            .await?;
+        Ok(model::VerifiedAuthn {
+            subject: verified.subject,
+            user: user_from_token_principal(&principal),
+            principal,
+        })
+    }
+
+    pub async fn user_by_id(&self, user_id: &str) -> Result<model::User, CoreError> {
+        self.accounts.user_by_id(user_id).await
+    }
+
     pub async fn exchange_authz(
         &self,
         authn: model::VerifiedAuthn,

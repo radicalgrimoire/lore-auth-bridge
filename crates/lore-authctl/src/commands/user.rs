@@ -41,8 +41,7 @@ pub(crate) async fn run(config_path: &Path, db: Option<&Path>, command: UserComm
             println!("{}\t{}\t{}", user.id, value(&user.email), user.status);
         }
         UserCommand::BindIdentity(args) => {
-            let (provider_id, issuer) =
-                resolve_user_idp(&env.cfg, Some(&args.idp), "", "")?;
+            let (provider_id, issuer) = resolve_user_idp(&env.cfg, Some(&args.idp), "", "")?;
             let provider = env
                 .cfg
                 .identity_providers
@@ -61,7 +60,10 @@ pub(crate) async fn run(config_path: &Path, db: Option<&Path>, command: UserComm
                 })
                 .await
                 .map_err(core_error)?;
-            println!("{}\t{}\t{}", identity.user_id, identity.subject, identity.status);
+            println!(
+                "{}\t{}\t{}",
+                identity.user_id, identity.subject, identity.status
+            );
         }
         UserCommand::List => {
             for user in env

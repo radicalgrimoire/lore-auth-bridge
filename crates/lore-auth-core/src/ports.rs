@@ -49,6 +49,12 @@ pub trait AccountDirectory: AccountQuery {
         jti: &str,
     ) -> Result<model::TokenPrincipal, CoreError>;
 
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> Result<model::TokenPrincipal, CoreError>;
+
     async fn add_user(&self, input: model::AddUserInput) -> Result<model::User, CoreError>;
 
     async fn add_invitation(
@@ -257,6 +263,9 @@ pub trait GroupQuery: Send + Sync {
     /// Lists direct user members. Deleted users must not be returned.
     async fn list_group_members(&self, group: &str) -> Result<Vec<model::User>, CoreError>;
     async fn list_group_groups(&self, group: &str) -> Result<Vec<model::Group>, CoreError>;
+    async fn list_group_allowed_cidrs(&self, group: &str) -> Result<Vec<String>, CoreError>;
+    /// Lists CIDRs from all groups that apply to the user, including parent groups.
+    async fn list_user_allowed_cidrs(&self, user_id: &str) -> Result<Vec<String>, CoreError>;
 }
 
 #[async_trait]
@@ -278,6 +287,8 @@ pub trait GroupAdmin: Send + Sync {
         parent_group: &str,
         member_group: &str,
     ) -> Result<(), CoreError>;
+    async fn add_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError>;
+    async fn remove_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError>;
 }
 
 #[async_trait]

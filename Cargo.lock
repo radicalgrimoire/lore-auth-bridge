@@ -1417,6 +1417,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rusqlite",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -1426,6 +1427,7 @@ name = "lore-auth-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ipnet",
  "thiserror 2.0.18",
  "tokio",
 ]

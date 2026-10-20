@@ -157,6 +157,10 @@ pub(crate) enum GroupCommand {
         #[command(subcommand)]
         command: GroupNestCommand,
     },
+    NetworkCidr {
+        #[command(subcommand)]
+        command: GroupNetworkCidrCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +192,24 @@ pub(crate) enum GroupNestCommand {
 pub(crate) struct GroupNest {
     pub(crate) parent_group: String,
     pub(crate) member_group: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum GroupNetworkCidrCommand {
+    Add(GroupNetworkCidr),
+    Remove(GroupNetworkCidr),
+    List(GroupNetworkCidrList),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct GroupNetworkCidr {
+    pub(crate) group: String,
+    pub(crate) cidr: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct GroupNetworkCidrList {
+    pub(crate) group: String,
 }
 
 #[derive(Debug, Subcommand)]

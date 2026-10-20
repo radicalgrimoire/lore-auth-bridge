@@ -1,6 +1,7 @@
 //! `ucs.auth.RebacApi` tonic server wiring and ReBAC peer allowlist middleware.
 
 use std::{
+    collections::HashSet,
     future::Future,
     net::IpAddr,
     pin::Pin,
@@ -10,7 +11,10 @@ use std::{
 
 use http::{Request as HttpRequest, Response as HttpResponse};
 use ipnet::IpNet;
-use lore_auth_core::{CoreError, service::resource::ResourceService};
+use lore_auth_core::{
+    CoreError,
+    service::{resource::ResourceService, token::TokenService},
+};
 use lore_auth_proto::ucs::auth::{
     CreateResourceRequest, CreateResourceResponse, DeleteResourceRequest, DeleteResourceResponse,
     rebac_api_server::{RebacApi, RebacApiServer},
@@ -25,12 +29,22 @@ const REBAC_SERVICE_METHOD_PREFIX: &str = "/ucs.auth.RebacApi/";
 #[derive(Clone)]
 pub struct RebacServer {
     resources: Arc<ResourceService>,
+    tokens: Arc<TokenService>,
+    admin_emails: HashSet<String>,
 }
 
 impl RebacServer {
     #[must_use]
-    pub fn new(resources: Arc<ResourceService>) -> Self {
-        Self { resources }
+    pub fn new(
+        resources: Arc<ResourceService>,
+        tokens: Arc<TokenService>,
+        admin_emails: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            resources,
+            tokens,
+            admin_emails: admin_emails.into_iter().collect(),
+        }
     }
 
     #[must_use]
@@ -45,10 +59,12 @@ impl RebacApi for RebacServer {
         &self,
         request: Request<CreateResourceRequest>,
     ) -> Result<Response<CreateResourceResponse>, Status> {
-        let req = request.into_inner();
-        if req.resource_id.is_empty() {
+        let resource_id = request.get_ref().resource_id.clone();
+        if resource_id.is_empty() {
             return Err(Status::invalid_argument("resource_id is required"));
         }
+        self.verify_admin_authn(&request).await?;
+        let req = request.into_inner();
         self.resources
             .create_resource(&req.resource_id, &req.resource_name)
             .await
@@ -60,13 +76,48 @@ impl RebacApi for RebacServer {
         &self,
         request: Request<DeleteResourceRequest>,
     ) -> Result<Response<DeleteResourceResponse>, Status> {
-        let req = request.into_inner();
-        if req.resource_id.is_empty() {
+        let resource_id = request.get_ref().resource_id.clone();
+        if resource_id.is_empty() {
             return Err(Status::invalid_argument("resource_id is required"));
         }
-        match self.resources.delete_resource(&req.resource_id).await {
+        let bearer = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("authorization header required"))?;
+        let authn = self
+            .tokens
+            .verify_authz(bearer, &resource_id)
+            .await
+            .map_err(|_| Status::unauthenticated("invalid authorization token"))?;
+        self.require_admin(&authn.user.email)?;
+        match self.resources.delete_resource(&resource_id).await {
             Ok(()) | Err(CoreError::NotFound) => Ok(Response::new(DeleteResourceResponse {})),
             Err(_) => Err(Status::internal("failed to delete resource")),
+        }
+    }
+}
+
+impl RebacServer {
+    async fn verify_admin_authn<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        let bearer = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("authorization header required"))?;
+        let authn = self
+            .tokens
+            .verify_authn(bearer)
+            .await
+            .map_err(|_| Status::unauthenticated("invalid authentication token"))?;
+        self.require_admin(&authn.user.email)
+    }
+
+    fn require_admin(&self, email: &str) -> Result<(), Status> {
+        if self.admin_emails.contains(&email.to_ascii_lowercase()) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied("global admin permission is required"))
         }
     }
 }

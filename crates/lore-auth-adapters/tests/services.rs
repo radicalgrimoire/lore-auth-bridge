@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use lore_auth_adapters::{device::UuidDeviceCodeGenerator, memory::Store};
@@ -10,8 +10,8 @@ use lore_auth_core::{
     },
     ports::{
         AccountDirectory, BeginAuthRequest, BeginAuthResult, CompleteAuthRequest,
-        DeviceCodeGenerator, IdentityProvider, IdentityProviderDescriptor,
-        IdentityProviderRegistry,
+        DeviceCodeGenerator, GroupAdmin, IdentityProvider, IdentityProviderDescriptor,
+        IdentityProviderRegistry, StateStore,
     },
     service::{
         device::{DeviceConfig, DeviceService},
@@ -252,10 +252,92 @@ async fn login_service_binds_verified_email_invitation_and_rejects_session_state
         .await
         .expect("start auth session");
     let err = login
-        .get_auth_session(&auth_session.session_code, "wrong-client-state")
+        .get_auth_session(&auth_session.session_code, "wrong-client-state", None)
         .await
         .expect_err("client state mismatch");
     assert!(matches!(err, CoreError::InvalidArgument(_)));
+}
+
+#[tokio::test]
+async fn login_service_enforces_all_applicable_group_cidrs_with_or_semantics() {
+    let store = Arc::new(Store::new());
+    let user = store.add_test_user(User {
+        email: "alice@example.com".to_owned(),
+        status: "active".to_owned(),
+        ..User::default()
+    });
+    store
+        .add_group("company-a", "")
+        .await
+        .expect("add first group");
+    store
+        .add_group("company-b", "")
+        .await
+        .expect("add second group");
+    store
+        .add_group_member("company-a", &user.id)
+        .await
+        .expect("add first membership");
+    store
+        .add_group_member("company-b", &user.id)
+        .await
+        .expect("add second membership");
+    store
+        .add_group_allowed_cidr("company-a", "192.0.2.25/24")
+        .await
+        .expect("add first CIDR");
+    store
+        .add_group_allowed_cidr("company-b", "198.51.100.0/24")
+        .await
+        .expect("add second CIDR");
+    let login = login_service(&store, registry([]));
+
+    for ip in ["192.0.2.99", "198.51.100.99"] {
+        let auth_session = login
+            .start_auth_session("client-state")
+            .await
+            .expect("start auth session");
+        let session = store
+            .get_auth_session_by_code(&auth_session.session_code)
+            .await
+            .expect("get auth session");
+        store
+            .complete_auth_session(&session.id, &user.id)
+            .await
+            .expect("complete auth session");
+        let result = login
+            .get_auth_session(
+                &auth_session.session_code,
+                "client-state",
+                Some(ip.parse::<IpAddr>().expect("parse IP")),
+            )
+            .await
+            .expect("allowed IP mints a token");
+        assert!(result.ready);
+    }
+
+    let auth_session = login
+        .start_auth_session("client-state")
+        .await
+        .expect("start auth session");
+    let session = store
+        .get_auth_session_by_code(&auth_session.session_code)
+        .await
+        .expect("get auth session");
+    store
+        .complete_auth_session(&session.id, &user.id)
+        .await
+        .expect("complete auth session");
+    assert_eq!(
+        login
+            .get_auth_session(
+                &auth_session.session_code,
+                "client-state",
+                Some("203.0.113.99".parse().expect("parse IP")),
+            )
+            .await,
+        Err(CoreError::PermissionDenied)
+    );
 }
 
 #[tokio::test]
@@ -420,6 +502,7 @@ fn login_service(store: &Arc<Store>, registry: TestRegistry) -> LoginService {
             auth_session_ttl: Duration::from_secs(600),
         },
         Arc::new(registry),
+        store.clone(),
         store.clone(),
         store.clone(),
         token_service(store),

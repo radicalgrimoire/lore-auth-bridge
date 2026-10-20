@@ -29,7 +29,7 @@ use super::accounts::{
 use super::grants::{add_grant_conn, remove_grant_conn};
 use super::groups::{
     group_group_edge_exists_tx, group_group_would_cycle_tx, group_id_by_name_conn,
-    group_id_by_name_or_id_conn, group_id_by_name_or_id_tx,
+    group_id_by_name_or_id_conn, group_id_by_name_or_id_tx, normalize_group_cidr,
 };
 use super::issued_tokens::add_signing_key_meta_conn;
 use super::resources::{delete_resource_conn, upsert_resource_conn};
@@ -260,6 +260,16 @@ impl AccountDirectory for AuditedStore {
 
     async fn principal_by_authn_token_jti(&self, jti: &str) -> CoreResult<TokenPrincipal> {
         self.inner.principal_by_authn_token_jti(jti).await
+    }
+
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> CoreResult<TokenPrincipal> {
+        self.inner
+            .principal_by_authz_token_jti(jti, resource_id)
+            .await
     }
 
     async fn add_user(&self, input: AddUserInput) -> CoreResult<User> {
@@ -705,6 +715,77 @@ impl GroupAdmin for AuditedStore {
             .await
             .map_err(core_from_driver)
     }
+
+    async fn add_group_allowed_cidr(&self, group: &str, cidr: &str) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let group = group.to_owned();
+        let cidr = normalize_group_cidr(cidr)?;
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let group_id = group_id_by_name_or_id_tx(&tx, &group)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO group_network_cidrs (group_id, cidr, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![group_id, cidr, unix_now()],
+                )
+                .map_err(core_from_sql)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "group.network_cidr.add",
+                        "group",
+                        group,
+                        format!("cidr={cidr}"),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn remove_group_allowed_cidr(&self, group: &str, cidr: &str) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let group = group.to_owned();
+        let cidr = normalize_group_cidr(cidr)?;
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let group_id = group_id_by_name_or_id_tx(&tx, &group)?;
+                let changed = tx
+                    .execute(
+                        "DELETE FROM group_network_cidrs WHERE group_id = ?1 AND cidr = ?2",
+                        params![group_id, cidr],
+                    )
+                    .map_err(core_from_sql)?;
+                require_affected(changed, CoreError::NotFound)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "group.network_cidr.remove",
+                        "group",
+                        group,
+                        format!("cidr={cidr}"),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
 }
 
 #[async_trait]
@@ -719,6 +800,14 @@ impl GroupQuery for AuditedStore {
 
     async fn list_group_groups(&self, group: &str) -> CoreResult<Vec<Group>> {
         self.inner.list_group_groups(group).await
+    }
+
+    async fn list_group_allowed_cidrs(&self, group: &str) -> CoreResult<Vec<String>> {
+        self.inner.list_group_allowed_cidrs(group).await
+    }
+
+    async fn list_user_allowed_cidrs(&self, user_id: &str) -> CoreResult<Vec<String>> {
+        self.inner.list_user_allowed_cidrs(user_id).await
     }
 }
 

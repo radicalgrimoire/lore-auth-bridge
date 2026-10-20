@@ -20,6 +20,8 @@ fn write_config_with_authz(dir: &Path, authz_backend: &str) -> PathBuf {
     let db = dir.join("auth.sqlite3");
     let keys = dir.join("keys");
     let config = dir.join("auth.yaml");
+    let db_path = db.to_string_lossy().replace('\\', "/");
+    let keys_path = keys.to_string_lossy().replace('\\', "/");
     fs::write(
         &config,
         format!(
@@ -46,9 +48,7 @@ lore:
   default_remote_url: "lore://127.0.0.1:41337"
   auth_url: "ucs-auth://auth.example.com"
 "#,
-            db.display(),
-            authz_backend,
-            keys.display()
+            db_path, authz_backend, keys_path
         ),
     )
     .expect("write config");
@@ -280,6 +280,16 @@ fn authctl_group_commands_record_admin_audit() {
         &config,
         &["group", "nest", "remove", "leads", "artists"],
     ));
+    assert_success(run(
+        &config,
+        &["group", "network-cidr", "add", "artists", "192.0.2.9/24"],
+    ));
+    let cidrs = assert_success(run(&config, &["group", "network-cidr", "list", "artists"]));
+    assert_eq!(cidrs, "192.0.2.0/24\n");
+    assert_success(run(
+        &config,
+        &["group", "network-cidr", "remove", "artists", "192.0.2.0/24"],
+    ));
 
     let entries = list_admin_audit(&config);
     assert_eq!(
@@ -288,6 +298,8 @@ fn authctl_group_commands_record_admin_audit() {
             ("group.add", 2),
             ("group.member.add", 1),
             ("group.member.remove", 1),
+            ("group.network_cidr.add", 1),
+            ("group.network_cidr.remove", 1),
             ("group.nest.add", 1),
             ("group.nest.remove", 1),
             ("user.add", 1),

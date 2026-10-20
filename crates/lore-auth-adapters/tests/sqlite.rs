@@ -16,6 +16,7 @@ use lore_auth_core::{
         ResourceQuery, ResourceStore, SigningKeyAdmin, StateStore,
     },
 };
+use rusqlite::params;
 
 mod support;
 
@@ -216,6 +217,116 @@ async fn sqlite_grants_use_repository_name_not_lore_repository_id() {
             .await,
         Err(CoreError::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn sqlite_resource_delete_hard_deletes_related_records_and_reuses_name() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let user = store
+        .add_user(AddUserInput {
+            email: "alice@example.com".to_owned(),
+            ..AddUserInput::default()
+        })
+        .await
+        .expect("add user");
+    let old_repository_id = "old-repository-id";
+    let old_resource_id =
+        ResourceID::for_repository_id(old_repository_id).expect("old resource id");
+    store
+        .upsert(Resource {
+            name: "Watch".to_owned(),
+            lore_repository_id: old_repository_id.to_owned(),
+            resource_id: old_resource_id.clone(),
+            ..Resource::default()
+        })
+        .await
+        .expect("create old resource");
+    store
+        .add_grant("user", &user.id, "Watch", "writer")
+        .await
+        .expect("grant old resource");
+    let conn = raw_connection(&fixture.path);
+    let repository_id: String = conn
+        .query_row(
+            "SELECT id FROM repositories WHERE lore_repository_id = ?1",
+            params![old_repository_id],
+            |row| row.get(0),
+        )
+        .expect("repository id");
+    conn.execute(
+        "INSERT INTO device_authorizations (
+           id, device_code_hash, user_code_hash, requested_remote_url,
+           requested_repository_id, status, created_at, expires_at
+         ) VALUES ('device-1', 'device-code', 'user-code', 'lore://example', ?1, 'pending', 1, 2)",
+        params![repository_id],
+    )
+    .expect("add device authorization");
+    conn.execute(
+        "INSERT INTO issued_tokens (
+           jti, token_kind, repository_id, lore_resource_id, role, kid,
+           audience_json, issued_at, expires_at
+         ) VALUES ('token-1', 'authz', ?1, ?2, 'writer', 'test-key', '[]', 1, 2)",
+        params![repository_id, old_resource_id],
+    )
+    .expect("add issued token");
+    store
+        .delete(&old_resource_id)
+        .await
+        .expect("delete old resource");
+    for table in ["repositories", "grants", "issued_tokens"] {
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {} = ?1",
+                    if table == "repositories" {
+                        "lore_repository_id"
+                    } else {
+                        "repository_id"
+                    }
+                ),
+                params![if table == "repositories" {
+                    old_repository_id
+                } else {
+                    &repository_id
+                }],
+                |row| row.get(0),
+            )
+            .expect("count related records");
+        assert_eq!(count, 0, "{table} should be deleted");
+    }
+    let device_authorizations: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM device_authorizations WHERE requested_repository_id = ?1",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .expect("count device authorizations");
+    assert_eq!(device_authorizations, 0, "device authorizations should be deleted");
+
+    let new_repository_id = "new-repository-id";
+    let new_resource_id =
+        ResourceID::for_repository_id(new_repository_id).expect("new resource id");
+    store
+        .upsert(Resource {
+            name: "Watch".to_owned(),
+            lore_repository_id: new_repository_id.to_owned(),
+            resource_id: new_resource_id,
+            ..Resource::default()
+        })
+        .await
+        .expect("recreate resource with the deleted name");
+
+    let active = store.get_by_name("Watch").await.expect("active resource");
+    assert_eq!(active.lore_repository_id, new_repository_id);
+    assert!(
+        store
+            .list_grants("Watch")
+            .await
+            .expect("list new resource grants")
+            .is_empty(),
+        "grants for the deleted resource must not carry over"
+    );
 }
 
 #[tokio::test]

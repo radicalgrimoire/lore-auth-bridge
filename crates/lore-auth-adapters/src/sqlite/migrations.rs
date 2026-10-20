@@ -10,6 +10,7 @@ use tokio_rusqlite::{
 const BASELINE_VERSION: &str = "phase2b_baseline_20260702";
 const GROUP_GROUPS_VERSION: &str = "phase3_group_groups_20260702";
 const ADMIN_AUDIT_VERSION: &str = "phase4_admin_audit_20260702";
+const GROUP_NETWORK_CIDRS_VERSION: &str = "phase5_group_network_cidrs_20261020";
 
 const BASELINE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -254,6 +255,18 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(created_at);
 "#;
 
+const GROUP_NETWORK_CIDRS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS group_network_cidrs (
+  group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  cidr TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (group_id, cidr)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_network_cidrs_group
+ON group_network_cidrs(group_id);
+"#;
+
 impl Store {
     pub async fn migrate(&self) -> Result<()> {
         self.conn
@@ -261,6 +274,7 @@ impl Store {
                 conn.execute_batch(BASELINE_SCHEMA)?;
                 conn.execute_batch(GROUP_GROUPS_SCHEMA)?;
                 conn.execute_batch(ADMIN_AUDIT_SCHEMA)?;
+                conn.execute_batch(GROUP_NETWORK_CIDRS_SCHEMA)?;
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![BASELINE_VERSION, unix_now()],
@@ -273,6 +287,10 @@ impl Store {
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![ADMIN_AUDIT_VERSION, unix_now()],
                 )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![GROUP_NETWORK_CIDRS_VERSION, unix_now()],
+                )?;
                 Ok::<(), rusqlite::Error>(())
             })
             .await?;
@@ -282,7 +300,12 @@ impl Store {
     pub async fn validate_schema(&self) -> Result<()> {
         self.conn
             .call(|conn| {
-                for expected in [BASELINE_VERSION, GROUP_GROUPS_VERSION, ADMIN_AUDIT_VERSION] {
+                for expected in [
+                    BASELINE_VERSION,
+                    GROUP_GROUPS_VERSION,
+                    ADMIN_AUDIT_VERSION,
+                    GROUP_NETWORK_CIDRS_VERSION,
+                ] {
                     let version = conn
                         .query_row(
                             "SELECT version FROM schema_migrations WHERE version = ?1",

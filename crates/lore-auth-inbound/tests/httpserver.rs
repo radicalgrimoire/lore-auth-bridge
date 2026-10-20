@@ -1707,6 +1707,16 @@ impl AccountDirectory for FailingAccounts {
         self.inner.principal_by_authn_token_jti(jti).await
     }
 
+    async fn principal_by_authz_token_jti(
+        &self,
+        jti: &str,
+        resource_id: &str,
+    ) -> Result<model::TokenPrincipal, CoreError> {
+        self.inner
+            .principal_by_authz_token_jti(jti, resource_id)
+            .await
+    }
+
     async fn add_user(&self, input: model::AddUserInput) -> Result<model::User, CoreError> {
         self.inner.add_user(input).await
     }
@@ -1825,6 +1835,7 @@ fn new_test_app_with_admin(
             auth_session_ttl: Duration::from_secs(60 * 60),
         },
         Arc::new(registry),
+        store.clone(),
         store.clone(),
         store.clone(),
         tokens.clone(),

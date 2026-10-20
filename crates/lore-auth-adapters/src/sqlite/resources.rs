@@ -37,7 +37,11 @@ impl ResourceStore for Store {
     async fn delete(&self, resource_id: &str) -> CoreResult<()> {
         let lore_repository_id = model::ResourceID::repository_id_from_resource_id(resource_id);
         self.conn
-            .call(move |conn| delete_resource_conn(conn, &lore_repository_id))
+            .call(move |conn| {
+                let tx = conn.transaction().map_err(core_from_sql)?;
+                delete_resource_conn(&tx, &lore_repository_id)?;
+                tx.commit().map_err(core_from_sql)
+            })
             .await
             .map_err(core_from_driver)
     }
@@ -198,12 +202,29 @@ pub(super) fn delete_resource_conn(
     resource_id: &str,
 ) -> CoreResult<()> {
     let lore_repository_id = model::ResourceID::repository_id_from_resource_id(resource_id);
+    let repository_id = conn
+        .query_row(
+            "SELECT id FROM repositories WHERE lore_repository_id = ?1",
+            params![lore_repository_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(core_from_sql)?
+        .ok_or(CoreError::NotFound)?;
+    conn.execute(
+        "DELETE FROM device_authorizations WHERE requested_repository_id = ?1",
+        params![repository_id],
+    )
+    .map_err(core_from_sql)?;
+    conn.execute(
+        "DELETE FROM issued_tokens WHERE repository_id = ?1",
+        params![repository_id],
+    )
+    .map_err(core_from_sql)?;
     let changed = conn
         .execute(
-            "UPDATE repositories
-             SET status = 'deleted', updated_at = ?1
-             WHERE lore_repository_id = ?2",
-            params![unix_now(), lore_repository_id],
+            "DELETE FROM repositories WHERE id = ?1",
+            params![repository_id],
         )
         .map_err(core_from_sql)?;
     require_affected(changed, CoreError::NotFound)

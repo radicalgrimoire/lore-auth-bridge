@@ -15,12 +15,16 @@ use lore_auth_proto::epic_urc::{
     GetUserInfoRequest, GetUserInfoResponse, HealthCheckRequest, HealthCheckResponse,
     LookupUserPermissionsRequest, LookupUserPermissionsResponse, RefreshAuthSessionRequest,
     RefreshAuthSessionResponse, ResourcePermission, StartAuthSessionRequest,
-    StartAuthSessionResponse, UserToken, VerifyUserRequest, VerifyUserResponse, target_user,
+    StartAuthSessionResponse, UserInfo, UserToken, VerifyUserRequest, VerifyUserResponse,
+    target_user,
     urc_auth_api_server::{UrcAuthApi, UrcAuthApiServer},
 };
 use tonic::{Request, Response, Status};
 
-use crate::status::{auth_session_status, resource_token_exchange_status};
+use crate::{
+    peer::client_ip_from_grpc_request,
+    status::{auth_session_status, resource_token_exchange_status},
+};
 
 #[derive(Clone)]
 pub struct Services {
@@ -58,6 +62,19 @@ impl UrcAuthServer {
             .verify_authn(&bearer)
             .await
             .map_err(|_| Status::unauthenticated("invalid authn token"))
+    }
+
+    async fn authz_from_request<T>(
+        &self,
+        request: &Request<T>,
+        resource_id: &str,
+    ) -> Result<VerifiedAuthn, Status> {
+        let bearer = bearer_from_request(request)
+            .ok_or_else(|| Status::unauthenticated("authorization header required"))?;
+        self.tokens
+            .verify_authz(&bearer, resource_id)
+            .await
+            .map_err(|_| Status::unauthenticated("invalid authorization token"))
     }
 
     async fn resolve_subject_user(
@@ -112,10 +129,11 @@ impl UrcAuthApi for UrcAuthServer {
         &self,
         request: Request<GetAuthSessionRequest>,
     ) -> Result<Response<GetAuthSessionResponse>, Status> {
+        let client_ip = client_ip_from_grpc_request(&request);
         let req = request.into_inner();
         let result = self
             .login
-            .get_auth_session(&req.session_code, &req.client_state)
+            .get_auth_session(&req.session_code, &req.client_state, client_ip)
             .await
             .map_err(auth_session_status)?;
         if !result.ready {
@@ -246,9 +264,27 @@ impl UrcAuthApi for UrcAuthServer {
 
     async fn get_user_info(
         &self,
-        _request: Request<GetUserInfoRequest>,
+        request: Request<GetUserInfoRequest>,
     ) -> Result<Response<GetUserInfoResponse>, Status> {
-        Err(Status::unimplemented("method GetUserInfo not implemented"))
+        let resource_id = request.get_ref().resource_id.clone();
+        if resource_id.is_empty() {
+            return Err(Status::invalid_argument("resource_id is required"));
+        }
+        self.authz_from_request(&request, &resource_id).await?;
+        let req = request.into_inner();
+        let mut user_info = Vec::with_capacity(req.user_id.len());
+        for requested_id in req.user_id {
+            let user_id = requested_id.strip_prefix("user:").unwrap_or(&requested_id);
+            match self.tokens.user_by_id(user_id).await {
+                Ok(user) => user_info.push(UserInfo {
+                    user_id: requested_id,
+                    display_name: user.display(),
+                }),
+                Err(lore_auth_core::CoreError::NotFound) => {}
+                Err(_) => return Err(Status::internal("failed to resolve user info")),
+            }
+        }
+        Ok(Response::new(GetUserInfoResponse { user_info }))
     }
 
     async fn get_user_id(

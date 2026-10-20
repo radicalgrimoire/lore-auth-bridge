@@ -2,6 +2,7 @@
 //! Owns group membership and group-group edge persistence.
 
 use async_trait::async_trait;
+use ipnet::IpNet;
 use lore_auth_core::{
     CoreError,
     model::{Group, User},
@@ -167,6 +168,42 @@ impl GroupAdmin for Store {
             .await
             .map_err(core_from_driver)
     }
+
+    async fn add_group_allowed_cidr(&self, group: &str, cidr: &str) -> CoreResult<()> {
+        let group = group.to_owned();
+        let cidr = normalize_group_cidr(cidr)?;
+        self.conn
+            .call(move |conn| {
+                let group_id = group_id_by_name_or_id_conn(conn, &group)?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO group_network_cidrs (group_id, cidr, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![group_id, cidr, unix_now()],
+                )
+                .map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn remove_group_allowed_cidr(&self, group: &str, cidr: &str) -> CoreResult<()> {
+        let group = group.to_owned();
+        let cidr = normalize_group_cidr(cidr)?;
+        self.conn
+            .call(move |conn| {
+                let group_id = group_id_by_name_or_id_conn(conn, &group)?;
+                let changed = conn
+                    .execute(
+                        "DELETE FROM group_network_cidrs WHERE group_id = ?1 AND cidr = ?2",
+                        params![group_id, cidr],
+                    )
+                    .map_err(core_from_sql)?;
+                require_affected(changed, CoreError::NotFound)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
 }
 
 #[async_trait]
@@ -231,6 +268,71 @@ impl GroupQuery for Store {
             .await
             .map_err(core_from_driver)
     }
+
+    async fn list_group_allowed_cidrs(&self, group: &str) -> CoreResult<Vec<String>> {
+        let group = group.to_owned();
+        self.conn
+            .call(move |conn| {
+                let group_id = group_id_by_name_or_id_conn(conn, &group)?;
+                list_group_allowed_cidrs_conn(conn, &group_id)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn list_user_allowed_cidrs(&self, user_id: &str) -> CoreResult<Vec<String>> {
+        let user_id = user_id.to_owned();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "WITH RECURSIVE applicable_groups(group_id) AS (
+                           SELECT group_id FROM group_members WHERE user_id = ?1
+                           UNION
+                           SELECT gg.group_id
+                           FROM group_groups gg
+                           JOIN applicable_groups ag ON gg.member_group_id = ag.group_id
+                         )
+                         SELECT DISTINCT gnc.cidr
+                         FROM group_network_cidrs gnc
+                         JOIN applicable_groups ag ON ag.group_id = gnc.group_id
+                         ORDER BY gnc.cidr",
+                    )
+                    .map_err(core_from_sql)?;
+                let rows = stmt
+                    .query_map(params![user_id], |row| row.get::<_, String>(0))
+                    .map_err(core_from_sql)?;
+                collect_rows(rows)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+}
+
+pub(super) fn normalize_group_cidr(value: &str) -> CoreResult<String> {
+    let value = value.trim();
+    if value.is_empty() || !value.contains('/') {
+        return Err(CoreError::InvalidArgument(
+            "CIDR must include an address and prefix length".to_owned(),
+        ));
+    }
+    value
+        .parse::<IpNet>()
+        .map(|cidr| cidr.trunc().to_string())
+        .map_err(|_| CoreError::InvalidArgument("CIDR is invalid".to_owned()))
+}
+
+pub(super) fn list_group_allowed_cidrs_conn(
+    conn: &rusqlite::Connection,
+    group_id: &str,
+) -> CoreResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT cidr FROM group_network_cidrs WHERE group_id = ?1 ORDER BY cidr")
+        .map_err(core_from_sql)?;
+    let rows = stmt
+        .query_map(params![group_id], |row| row.get::<_, String>(0))
+        .map_err(core_from_sql)?;
+    collect_rows(rows)
 }
 
 pub(super) fn group_id_by_name_conn(conn: &rusqlite::Connection, name: &str) -> CoreResult<String> {

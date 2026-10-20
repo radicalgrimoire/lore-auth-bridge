@@ -1,6 +1,7 @@
 //! Group administration and group query behavior for the memory adapter.
 
 use async_trait::async_trait;
+use ipnet::IpNet;
 use lore_auth_core::{
     CoreError,
     model::{Group, User},
@@ -8,7 +9,8 @@ use lore_auth_core::{
 };
 
 use super::{
-    Store, group_by_name_or_id, group_group_would_cycle, resolve_group_id, resolve_user_id,
+    Store, grant_subject_keys_for_user, group_by_name_or_id, group_group_would_cycle,
+    resolve_group_id, resolve_user_id,
 };
 
 #[async_trait]
@@ -103,6 +105,33 @@ impl GroupAdmin for Store {
         members.remove(index);
         Ok(())
     }
+
+    async fn add_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError> {
+        let cidr = normalize_group_cidr(cidr)?;
+        let mut state = self.lock();
+        let group_id = resolve_group_id(&state, group)?.to_owned();
+        let cidrs = state.group_network_cidrs.entry(group_id).or_default();
+        if !cidrs.contains(&cidr) {
+            cidrs.push(cidr);
+            cidrs.sort();
+        }
+        Ok(())
+    }
+
+    async fn remove_group_allowed_cidr(&self, group: &str, cidr: &str) -> Result<(), CoreError> {
+        let cidr = normalize_group_cidr(cidr)?;
+        let mut state = self.lock();
+        let group_id = resolve_group_id(&state, group)?.to_owned();
+        let cidrs = state
+            .group_network_cidrs
+            .get_mut(&group_id)
+            .ok_or(CoreError::NotFound)?;
+        let Some(index) = cidrs.iter().position(|candidate| candidate == &cidr) else {
+            return Err(CoreError::NotFound);
+        };
+        cidrs.remove(index);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -160,4 +189,44 @@ impl GroupQuery for Store {
         out.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(out)
     }
+
+    async fn list_group_allowed_cidrs(&self, group: &str) -> Result<Vec<String>, CoreError> {
+        let state = self.lock();
+        let group_id = resolve_group_id(&state, group)?;
+        Ok(state
+            .group_network_cidrs
+            .get(group_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn list_user_allowed_cidrs(&self, user_id: &str) -> Result<Vec<String>, CoreError> {
+        let state = self.lock();
+        let mut cidrs = grant_subject_keys_for_user(&state, user_id)
+            .into_iter()
+            .filter_map(|(subject_type, subject_id)| {
+                (subject_type == "group")
+                    .then(|| state.group_network_cidrs.get(&subject_id))
+                    .flatten()
+            })
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        cidrs.sort();
+        cidrs.dedup();
+        Ok(cidrs)
+    }
+}
+
+fn normalize_group_cidr(value: &str) -> Result<String, CoreError> {
+    let value = value.trim();
+    if value.is_empty() || !value.contains('/') {
+        return Err(CoreError::InvalidArgument(
+            "CIDR must include an address and prefix length".to_owned(),
+        ));
+    }
+    value
+        .parse::<IpNet>()
+        .map(|cidr| cidr.trunc().to_string())
+        .map_err(|_| CoreError::InvalidArgument("CIDR is invalid".to_owned()))
 }

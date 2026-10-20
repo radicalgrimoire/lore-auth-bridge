@@ -17,12 +17,13 @@ use lore_auth_core::{
 };
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, JsonWebKey,
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
     reqwest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tracing::warn;
 
 use crate::config::IdentityProviderConfig;
 
@@ -291,6 +292,7 @@ impl IdentityProvider for Provider {
         if !req.login_hint.is_empty() {
             auth_request = auth_request.add_extra_param("login_hint", req.login_hint);
         }
+        auth_request = auth_request.add_extra_param("response_mode", "query");
 
         let mut private_state = PrivateState::default();
         if self.pkce == "required" {
@@ -332,11 +334,23 @@ impl IdentityProvider for Provider {
         let token_response = token_request
             .request_async(&self.http_client)
             .await
-            .map_err(|_| CoreError::Unauthenticated)?;
-        let id_token = token_response
-            .id_token()
-            .ok_or(CoreError::Unauthenticated)?;
+            .map_err(|err| {
+                warn!(provider_id = %self.id, error = %err, "OIDC token exchange failed");
+                CoreError::Unauthenticated
+            })?;
+        let id_token = token_response.id_token().ok_or_else(|| {
+            warn!(provider_id = %self.id, "OIDC token response did not include an ID token");
+            CoreError::Unauthenticated
+        })?;
         let raw_id_token = id_token.to_string();
+        let token_kid = jwt_key_id(&raw_id_token);
+        let verification_key_ids = self
+            .provider_metadata
+            .jwks()
+            .keys()
+            .iter()
+            .filter_map(|key| key.key_id())
+            .collect::<Vec<_>>();
         let verifier = client.id_token_verifier();
         let expected_nonce = req.nonce.clone();
         let verified_claims = id_token
@@ -349,7 +363,16 @@ impl IdentityProvider for Provider {
                     _ => Err("oidc: id token nonce mismatch".to_owned()),
                 }
             })
-            .map_err(|_| CoreError::Unauthenticated)?;
+            .map_err(|err| {
+                warn!(
+                    provider_id = %self.id,
+                    token_kid = ?token_kid,
+                    verification_key_ids = ?verification_key_ids,
+                    error = %err,
+                    "OIDC ID token validation failed"
+                );
+                CoreError::Unauthenticated
+            })?;
         let raw_claims = jwt_claims(&raw_id_token)?;
         let subject = self.subject(&raw_claims, verified_claims.subject().as_str())?;
         let identity = ExternalIdentity {
@@ -367,6 +390,16 @@ impl IdentityProvider for Provider {
         self.validate_trust(&identity)?;
         Ok(identity)
     }
+}
+
+fn jwt_key_id(compact_jwt: &str) -> Option<String> {
+    let encoded_header = compact_jwt.split('.').next()?;
+    let header = URL_SAFE_NO_PAD.decode(encoded_header).ok()?;
+    serde_json::from_slice::<Value>(&header)
+        .ok()?
+        .get("kid")?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
