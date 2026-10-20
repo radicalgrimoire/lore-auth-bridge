@@ -1,2 +1,3 @@
 internal/loreproto/** linguist-generated=true
 third_party/lore-proto/** linguist-vendored=true
+*.rs text eol=lf
