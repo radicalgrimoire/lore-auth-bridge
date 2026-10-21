@@ -7,7 +7,8 @@ use lore_auth_core::{
     CoreError,
     ports::{
         AccountDirectory, AccountQuery, DeviceAuthorizationStore, GrantQuery, GroupQuery,
-        IssuedTokenLog, ResourceQuery, ResourceStore, StateStore, TokenSigner,
+        IssuedTokenLog, ResourceQuery, ResourceStore, ServiceAccountDirectory, StateStore,
+        TokenSigner,
     },
     service::{
         device::{DeviceConfig, DeviceService},
@@ -104,6 +105,8 @@ async fn run(cli: Cli) -> Result<()> {
                     login: graph.login.clone(),
                     tokens: graph.tokens.clone(),
                     permissions: graph.permissions.clone(),
+                    service_accounts: graph.service_accounts.clone(),
+                    groups: graph.groups.clone(),
                 })
                 .into_service(),
             )
@@ -129,6 +132,8 @@ struct ServiceGraph {
     tokens: Arc<TokenService>,
     resources: Arc<ResourceService>,
     permissions: Arc<PermissionService>,
+    service_accounts: Arc<dyn ServiceAccountDirectory>,
+    groups: Arc<dyn GroupQuery>,
     http_config: HttpConfig,
     http_services: HttpServices,
 }
@@ -161,6 +166,7 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
     let state_store: Arc<dyn StateStore> = store.clone();
     let device_store: Arc<dyn DeviceAuthorizationStore> = store.clone();
     let groups: Arc<dyn GroupQuery> = store.clone();
+    let service_accounts: Arc<dyn ServiceAccountDirectory> = store.clone();
     let grants: Arc<dyn GrantQuery> = store.clone();
 
     let auth_service_audience = config::public_host(&cfg.server.public_base_url)
@@ -240,7 +246,7 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
         permissions: permissions.clone(),
         accounts: account_query,
         admin_writes,
-        groups,
+        groups: groups.clone(),
         grants,
         state: state_store,
         jwks: signer,
@@ -252,6 +258,8 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
         tokens,
         resources,
         permissions,
+        service_accounts,
+        groups,
         http_config,
         http_services,
     })

@@ -249,6 +249,24 @@ pub struct User {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServiceAccount {
+    pub user: User,
+    pub client_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreateServiceAccountInput {
+    pub client_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreatedServiceAccount {
+    pub account: ServiceAccount,
+    pub client_secret: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserListFilter {
     pub query: String,
     pub limit: usize,

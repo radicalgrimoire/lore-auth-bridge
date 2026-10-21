@@ -44,6 +44,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: UserCommand,
     },
+    ServiceAccount {
+        #[command(subcommand)]
+        command: ServiceAccountCommand,
+    },
     Group {
         #[command(subcommand)]
         command: GroupCommand,
@@ -101,6 +105,26 @@ pub(crate) enum UserCommand {
     List,
     Disable(UserDisable),
     Enable(UserEnable),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServiceAccountCommand {
+    Add(ServiceAccountAdd),
+    Rotate(ServiceAccountRotate),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServiceAccountAdd {
+    #[arg(long)]
+    pub(crate) client_id: String,
+    #[arg(long, default_value = "")]
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServiceAccountRotate {
+    #[arg(long)]
+    pub(crate) client_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -308,6 +332,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::User { command } => {
             commands::user::run(&config_path, db.as_deref(), command).await?
+        }
+        Command::ServiceAccount { command } => {
+            commands::service_account::run(&config_path, db.as_deref(), command).await?
         }
         Command::Group { command } => {
             commands::group::run(&config_path, db.as_deref(), command).await?

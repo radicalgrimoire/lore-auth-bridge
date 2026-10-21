@@ -146,6 +146,8 @@ async fn get_auth_session_token_issue_failure_is_internal() {
         login,
         tokens: failing_tokens,
         permissions: Arc::new(PermissionService::new(store.clone(), store.clone())),
+        service_accounts: store.clone(),
+        groups: store.clone(),
     });
 
     let start = server
@@ -356,6 +358,8 @@ async fn exchange_internal_token_issue_failure_is_internal() {
         )),
         tokens: issuing_tokens,
         permissions: Arc::new(PermissionService::new(store.clone(), store.clone())),
+        service_accounts: store.clone(),
+        groups: store.clone(),
     });
 
     let err = server
@@ -513,6 +517,8 @@ fn new_test_server() -> (UrcAuthServer, Arc<memory::Store>, Arc<TokenService>) {
             login,
             tokens: tokens.clone(),
             permissions,
+            service_accounts: store.clone(),
+            groups: store.clone(),
         }),
         store,
         tokens,

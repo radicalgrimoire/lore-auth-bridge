@@ -1,9 +1,11 @@
 //! `epic_urc.UrcAuthApi` tonic server wiring.
 
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 
+use ipnet::IpNet;
 use lore_auth_core::{
     model::{Permission, User, VerifiedAuthn},
+    ports::{GroupQuery, ServiceAccountDirectory},
     service::{login::LoginService, permission::PermissionService, token::TokenService},
 };
 use lore_auth_proto::epic_urc::{
@@ -31,6 +33,8 @@ pub struct Services {
     pub login: Arc<LoginService>,
     pub tokens: Arc<TokenService>,
     pub permissions: Arc<PermissionService>,
+    pub service_accounts: Arc<dyn ServiceAccountDirectory>,
+    pub groups: Arc<dyn GroupQuery>,
 }
 
 #[derive(Clone)]
@@ -38,6 +42,8 @@ pub struct UrcAuthServer {
     login: Arc<LoginService>,
     tokens: Arc<TokenService>,
     permissions: Arc<PermissionService>,
+    service_accounts: Arc<dyn ServiceAccountDirectory>,
+    groups: Arc<dyn GroupQuery>,
 }
 
 impl UrcAuthServer {
@@ -47,6 +53,8 @@ impl UrcAuthServer {
             login: services.login,
             tokens: services.tokens,
             permissions: services.permissions,
+            service_accounts: services.service_accounts,
+            groups: services.groups,
         }
     }
 
@@ -92,9 +100,42 @@ impl UrcAuthServer {
                 .map(|authn| authn.user)
                 .map_err(|_| Status::invalid_argument("invalid target_user token"));
         }
+
         self.authn_from_request(request)
             .await
             .map(|authn| authn.user)
+    }
+
+    async fn authenticate_service_account(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        client_ip: Option<IpAddr>,
+    ) -> Result<User, Status> {
+        let user = self
+            .service_accounts
+            .authenticate_service_account(client_id, client_secret)
+            .await
+            .map_err(|_| Status::unauthenticated("invalid service account credentials"))?;
+        let Some(client_ip) = client_ip else {
+            return Err(Status::unauthenticated("client address unavailable"));
+        };
+        let cidrs = self
+            .groups
+            .list_user_allowed_cidrs(&user.id)
+            .await
+            .map_err(|_| Status::unauthenticated("service account network is not allowed"))?;
+        if cidrs.is_empty()
+            || !cidrs
+                .iter()
+                .filter_map(|cidr| cidr.parse::<IpNet>().ok())
+                .any(|cidr| cidr.contains(&client_ip))
+        {
+            return Err(Status::unauthenticated(
+                "service account network is not allowed",
+            ));
+        }
+        Ok(user)
     }
 }
 
@@ -162,11 +203,34 @@ impl UrcAuthApi for UrcAuthServer {
 
     async fn exchange_external_token_for_user_token(
         &self,
-        _request: Request<ExchangeExternalTokenForUserTokenRequest>,
+        request: Request<ExchangeExternalTokenForUserTokenRequest>,
     ) -> Result<Response<ExchangeExternalTokenForUserTokenResponse>, Status> {
-        Err(Status::unimplemented(
-            "method ExchangeExternalTokenForUserToken not implemented",
-        ))
+        let client_ip = client_ip_from_grpc_request(&request);
+        let req = request.into_inner();
+        if req.token_type != "service-account" {
+            return Err(Status::unimplemented("unsupported external token type"));
+        }
+        let Some((client_id, client_secret)) = req.external_token.split_once(':') else {
+            return Err(Status::unauthenticated(
+                "invalid service account credentials",
+            ));
+        };
+        if client_id.is_empty() || client_secret.is_empty() || client_secret.contains(':') {
+            return Err(Status::unauthenticated(
+                "invalid service account credentials",
+            ));
+        }
+        let user = self
+            .authenticate_service_account(client_id, client_secret, client_ip)
+            .await?;
+        let (token, _) = self
+            .tokens
+            .mint_authn(&user.id, None)
+            .await
+            .map_err(|_| Status::unauthenticated("service account is not available"))?;
+        Ok(Response::new(ExchangeExternalTokenForUserTokenResponse {
+            user_token: Some(user_token(token, user)),
+        }))
     }
 
     async fn exchange_api_key_for_user_token(

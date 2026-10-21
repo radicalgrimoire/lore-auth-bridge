@@ -9,6 +9,7 @@ mod groups;
 mod issued_tokens;
 mod migrations;
 mod resources;
+mod service_accounts;
 mod state;
 
 pub use audited::{AuditedStore, AuditedStoreFactory};

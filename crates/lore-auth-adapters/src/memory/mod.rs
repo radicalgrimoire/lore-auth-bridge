@@ -7,6 +7,7 @@ mod devices;
 mod grants;
 mod groups;
 mod resources;
+mod service_accounts;
 mod state;
 mod tokens;
 
@@ -37,6 +38,7 @@ pub struct Store {
 struct State {
     users: HashMap<String, User>,
     identities: HashMap<String, ExternalIdentity>,
+    service_accounts: HashMap<String, ServiceAccountCredential>,
     invitations: HashMap<String, IdentityInvitation>,
     resources: HashMap<String, Resource>,
     grants: HashMap<(String, String), HashMap<String, String>>,
@@ -62,6 +64,12 @@ struct CsrfToken {
     session_id: String,
     expires_at: i64,
     consumed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServiceAccountCredential {
+    client_id: String,
+    secret_hash: String,
 }
 
 impl Store {
@@ -172,6 +180,14 @@ fn resolve_user_id<'a>(state: &'a State, email_or_id: &str) -> Result<&'a str, C
         .find(|user| user.id == email_or_id || user.email == email_or_id)
         .map(|user| user.id.as_str())
         .ok_or(CoreError::NotFound)
+}
+
+fn random_secret() -> String {
+    [
+        uuid::Uuid::new_v4().as_simple().to_string(),
+        uuid::Uuid::new_v4().as_simple().to_string(),
+    ]
+    .join("")
 }
 
 fn resolve_group_id<'a>(state: &'a State, group: &str) -> Result<&'a str, CoreError> {
