@@ -20,10 +20,10 @@ fn role_permissions_expand_bridge_roles() {
 }
 
 #[test]
-fn token_permissions_do_not_emit_lore_admin_for_bridge_admin() {
+fn token_permissions_include_lore_admin_for_bridge_admin() {
     assert_eq!(
         Role::Admin.token_permissions(),
-        Some(vec![Permission::Read, Permission::Write])
+        Some(vec![Permission::Read, Permission::Write, Permission::Admin])
     );
 }
 

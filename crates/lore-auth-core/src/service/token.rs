@@ -3,6 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use super::permission::writer_permissions;
 use crate::{
     CoreError,
     model::{self, Permission},
@@ -164,6 +165,17 @@ impl TokenService {
         resource_ids: &[String],
         ttl: Option<Duration>,
     ) -> Result<model::SignedToken, CoreError> {
+        self.exchange_authz_scoped(authn, resource_ids, ttl, true)
+            .await
+    }
+
+    async fn exchange_authz_scoped(
+        &self,
+        authn: model::VerifiedAuthn,
+        resource_ids: &[String],
+        ttl: Option<Duration>,
+        include_admin: bool,
+    ) -> Result<model::SignedToken, CoreError> {
         if authn.principal.user_id.is_empty() {
             return Err(CoreError::Unauthenticated);
         }
@@ -183,9 +195,19 @@ impl TokenService {
             if !allowed {
                 return Err(CoreError::PermissionDenied);
             }
+            let permission = if include_admin {
+                writer_permissions(
+                    self.authz.as_ref(),
+                    &authn.principal.user_id,
+                    &resource.resource_id,
+                )
+                .await?
+            } else {
+                vec![Permission::Read, Permission::Write]
+            };
             resources.push(model::ResourcePermission {
                 resource_id: resource.resource_id,
-                permission: vec![Permission::Read, Permission::Write],
+                permission,
             });
         }
 
@@ -224,6 +246,24 @@ impl TokenService {
                 "MVP only issues writer tokens; got {role:?}"
             )));
         }
+        self.mint_user_authz(user_id, repo_name, ttl, false).await
+    }
+
+    pub async fn device_mint_authz(
+        &self,
+        user_id: &str,
+        repo_name: &str,
+    ) -> Result<model::SignedToken, CoreError> {
+        self.mint_user_authz(user_id, repo_name, None, true).await
+    }
+
+    async fn mint_user_authz(
+        &self,
+        user_id: &str,
+        repo_name: &str,
+        ttl: Option<Duration>,
+        include_admin: bool,
+    ) -> Result<model::SignedToken, CoreError> {
         let principal = self.accounts.principal_by_user_id(user_id).await?;
         let resource = self.resources.get_by_name(repo_name).await?;
         let allowed = self
@@ -233,7 +273,7 @@ impl TokenService {
         if !allowed {
             return Err(CoreError::PermissionDenied);
         }
-        self.exchange_authz(
+        self.exchange_authz_scoped(
             model::VerifiedAuthn {
                 subject: principal.token_subject.clone(),
                 user: user_from_token_principal(&principal),
@@ -241,6 +281,7 @@ impl TokenService {
             },
             &[resource.resource_id],
             ttl,
+            include_admin,
         )
         .await
     }

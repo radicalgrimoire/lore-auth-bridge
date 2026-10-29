@@ -99,6 +99,8 @@ lore:
 # admin:
 #   admin_emails:
 #     - "admin@example.com"
+#   # Opt in to read/write/admin access to all existing and future repositories.
+#   global_repository_admin: false
 
 security:
   device_code_ttl_seconds: 600

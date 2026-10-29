@@ -126,6 +126,90 @@ fn install_admin_audit_failure_trigger(config: &Path) {
 }
 
 #[test]
+fn check_uses_opt_in_global_repository_admin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = write_config(dir.path());
+    let base = fs::read_to_string(&config).expect("config");
+    let admin_config = "\nadmin:\n  admin_emails: [\"alice@example.com\"]\n";
+    fs::write(&config, format!("{base}{admin_config}")).expect("write config");
+    assert_success(run(&config, &["init-db"]));
+    assert_success(run(
+        &config,
+        &["user", "add", "--email", "alice@example.com"],
+    ));
+    assert_success(run(
+        &config,
+        &[
+            "repo",
+            "add",
+            "game-assets",
+            "--remote",
+            "lore://127.0.0.1:41337",
+            "--lore-repository-id",
+            "repo-1",
+        ],
+    ));
+    assert_eq!(
+        assert_success(run(
+            &config,
+            &["check", "alice@example.com", "game-assets", "admin"]
+        ))
+        .trim(),
+        "deny"
+    );
+    fs::write(
+        &config,
+        format!("{base}{admin_config}  global_repository_admin: true\n"),
+    )
+    .expect("enable global admin");
+    assert_eq!(
+        assert_success(run(
+            &config,
+            &["check", "alice@example.com", "game-assets", "admin"]
+        ))
+        .trim(),
+        "allow"
+    );
+    assert_success(run(
+        &config,
+        &[
+            "repo",
+            "add",
+            "future-repo",
+            "--remote",
+            "lore://127.0.0.1:41337",
+            "--lore-repository-id",
+            "repo-2",
+        ],
+    ));
+    assert_eq!(
+        assert_success(run(
+            &config,
+            &["check", "alice@example.com", "future-repo", "admin"]
+        ))
+        .trim(),
+        "allow"
+    );
+    assert_eq!(
+        assert_success(run(
+            &config,
+            &["check", "alice@example.com", "future-repo", "obliterate"]
+        ))
+        .trim(),
+        "deny"
+    );
+    fs::write(&config, format!("{base}{admin_config}")).expect("disable global admin");
+    assert_eq!(
+        assert_success(run(
+            &config,
+            &["check", "alice@example.com", "future-repo", "admin"]
+        ))
+        .trim(),
+        "deny"
+    );
+}
+
+#[test]
 fn init_invite_repo_grant_and_list_flow() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = write_config(dir.path());

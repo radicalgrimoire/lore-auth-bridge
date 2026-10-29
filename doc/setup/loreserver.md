@@ -53,6 +53,10 @@ auth_url = "https://localhost:8081"
 
 The `lore` CLI requests authz token exchange from `epic_urc.UrcAuthApi` during repository operations.
 
+A repository `admin` grant is reflected as the Lore `admin` permission in authorization tokens and permission checks. Where supported by Lore, an admin can release another user's file locks. This permission can also affect other Lore admin operations, so grant it only to trusted users or groups. Explicitly issued manual writer tokens do not include admin permission.
+
+Permission changes do not alter existing authorization tokens. The new permissions apply when the token expires or the repository authorization is refreshed.
+
 In that setup, keep this value aligned with `lore.auth_url` in the bridge config: `https://localhost:8081`.
 
 `RebacApi` is treated as a service-to-service API dedicated to `loreserver`.

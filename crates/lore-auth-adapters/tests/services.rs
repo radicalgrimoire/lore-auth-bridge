@@ -1,17 +1,27 @@
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use lore_auth_adapters::{device::UuidDeviceCodeGenerator, memory::Store};
+use lore_auth_adapters::{
+    device::UuidDeviceCodeGenerator,
+    memory::Store,
+    rs256::{self, Signer, SigningKey},
+};
 use lore_auth_core::{
     CoreError,
     model::{
-        AddInvitationInput, ExternalIdentity, LoginTrustPolicy, Permission, Resource, ResourceID,
-        TokenPrincipal, User, VerifiedAuthn,
+        AddInvitationInput, AuthnTokenInput, AuthzTokenInput, ExternalIdentity, LoginTrustPolicy,
+        Permission, Resource, ResourceID, ResourcePermission, SignedToken, TokenPrincipal, User,
+        VerifiedAuthn, VerifiedToken, VerifyOptions,
     },
     ports::{
-        AccountDirectory, BeginAuthRequest, BeginAuthResult, CompleteAuthRequest,
-        DeviceCodeGenerator, GroupAdmin, IdentityProvider, IdentityProviderDescriptor,
-        IdentityProviderRegistry, StateStore,
+        AccountDirectory, AuthorizationPolicy, BeginAuthRequest, BeginAuthResult,
+        CompleteAuthRequest, DeviceCodeGenerator, GrantAdmin, GroupAdmin, IdentityProvider,
+        IdentityProviderDescriptor, IdentityProviderRegistry, StateStore, TokenSigner,
     },
     service::{
         device::{DeviceConfig, DeviceService},
@@ -37,6 +47,279 @@ fn token_service(store: &Arc<Store>) -> Arc<TokenService> {
         store.clone(),
         Some(store.clone()),
     ))
+}
+
+struct RecordingSigner {
+    store: Arc<Store>,
+    resources: Mutex<Vec<ResourcePermission>>,
+}
+
+#[async_trait]
+impl TokenSigner for RecordingSigner {
+    async fn sign_authn(&self, input: AuthnTokenInput) -> Result<SignedToken, CoreError> {
+        self.store.sign_authn(input).await
+    }
+
+    async fn sign_authz(&self, input: AuthzTokenInput) -> Result<SignedToken, CoreError> {
+        *self.resources.lock().expect("resources lock") = input.resources.clone();
+        self.store.sign_authz(input).await
+    }
+
+    async fn verify(&self, compact: &str, opts: VerifyOptions) -> Result<VerifiedToken, CoreError> {
+        self.store.verify(compact, opts).await
+    }
+
+    async fn jwks(&self) -> Result<Vec<u8>, CoreError> {
+        self.store.jwks().await
+    }
+}
+
+struct AdminCheckFails;
+
+#[async_trait]
+impl AuthorizationPolicy for AdminCheckFails {
+    async fn can_access(
+        &self,
+        _user: &str,
+        _resource: &str,
+        action: &str,
+    ) -> Result<bool, CoreError> {
+        if action == "admin" {
+            Err(CoreError::Unsupported)
+        } else {
+            Ok(true)
+        }
+    }
+
+    async fn list_accessible(
+        &self,
+        _user: &str,
+        _filter: lore_auth_core::model::ResourceFilter,
+    ) -> Result<Vec<ResourcePermission>, CoreError> {
+        Err(CoreError::Unsupported)
+    }
+}
+
+#[tokio::test]
+async fn admin_permissions_are_checked_per_resource_and_errors_fail_closed() {
+    let store = Arc::new(Store::new());
+    let user = store.add_test_user(User {
+        id: "user-1".to_owned(),
+        status: "active".to_owned(),
+        ..User::default()
+    });
+    for (id, name) in [("urc-admin", "admin"), ("urc-writer", "writer")] {
+        store.add_test_resource(Resource {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            remote_url: "lore://example".to_owned(),
+            resource_id: id.to_owned(),
+            status: "active".to_owned(),
+            ..Resource::default()
+        });
+        store.grant_role(&user.id, id, name);
+    }
+    let signer = Arc::new(RecordingSigner {
+        store: store.clone(),
+        resources: Mutex::new(Vec::new()),
+    });
+    let config = TokenConfig {
+        issuer: "https://auth.example.com".to_owned(),
+        audience: vec!["lore-service".to_owned()],
+        auth_service_audience: "auth.example.com".to_owned(),
+        authn_ttl: Duration::from_secs(3600),
+        authz_ttl: Duration::from_secs(900),
+    };
+    let authn = VerifiedAuthn {
+        principal: TokenPrincipal {
+            user_id: user.id.clone(),
+            token_subject: user.bridge_subject(),
+            token_idp: "bridge".to_owned(),
+            ..TokenPrincipal::default()
+        },
+        subject: user.bridge_subject(),
+        user: user.clone(),
+    };
+    let service = Arc::new(TokenService::new(
+        config.clone(),
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        signer.clone(),
+        None,
+    ));
+    service
+        .exchange_authz(
+            authn.clone(),
+            &["urc-admin".to_owned(), "urc-writer".to_owned()],
+            None,
+        )
+        .await
+        .expect("multi-resource token");
+    assert_eq!(
+        *signer.resources.lock().expect("resources lock"),
+        vec![
+            ResourcePermission {
+                resource_id: "urc-admin".to_owned(),
+                permission: vec![Permission::Read, Permission::Write, Permission::Admin],
+            },
+            ResourcePermission {
+                resource_id: "urc-writer".to_owned(),
+                permission: vec![Permission::Read, Permission::Write],
+            },
+        ]
+    );
+
+    let device = DeviceService::new(
+        DeviceConfig {
+            public_base_url: "https://auth.example.com".to_owned(),
+            auth_url: "ucs-auth://auth.example.com".to_owned(),
+            device_code_ttl: Duration::from_secs(600),
+            poll_interval: Duration::from_secs(3),
+        },
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        service.clone(),
+        Arc::new(fixed_codes("admin-device", "ADMIN-001")),
+    );
+    let started = device
+        .start("lore://example", "admin")
+        .await
+        .expect("start");
+    device
+        .approve(&user.id, &started.user_code)
+        .await
+        .expect("approve");
+    assert_eq!(
+        device
+            .token(&started.device_code)
+            .await
+            .expect("token")
+            .status,
+        "ok"
+    );
+    assert_eq!(
+        *signer.resources.lock().expect("resources lock"),
+        vec![ResourcePermission {
+            resource_id: "urc-admin".to_owned(),
+            permission: vec![Permission::Read, Permission::Write, Permission::Admin],
+        }]
+    );
+
+    store.add_group("admins", "").await.expect("group");
+    store
+        .add_group_member("admins", &user.id)
+        .await
+        .expect("member");
+    store
+        .add_grant("group", "admins", "writer", "admin")
+        .await
+        .expect("group grant");
+    service
+        .exchange_authz(authn.clone(), &["urc-writer".to_owned()], None)
+        .await
+        .expect("group admin token");
+    assert_eq!(
+        signer.resources.lock().expect("resources lock")[0].permission,
+        vec![Permission::Read, Permission::Write, Permission::Admin]
+    );
+
+    let failing = Arc::new(AdminCheckFails);
+    let service = TokenService::new(
+        config,
+        store.clone(),
+        store.clone(),
+        failing.clone(),
+        signer,
+        None,
+    );
+    assert!(matches!(
+        service
+            .exchange_authz(authn, &["urc-admin".to_owned()], None)
+            .await,
+        Err(CoreError::Unsupported)
+    ));
+    let permissions = PermissionService::new(store, failing);
+    assert!(matches!(
+        permissions.check(&user.id, &["urc-admin".to_owned()]).await,
+        Err(CoreError::Unsupported)
+    ));
+}
+
+#[tokio::test]
+async fn signed_multi_resource_token_has_repository_scoped_admin_claim() {
+    let store = Arc::new(Store::new());
+    let user = store.add_test_user(User {
+        id: "user-1".to_owned(),
+        status: "active".to_owned(),
+        ..User::default()
+    });
+    for (resource_id, role) in [("urc-admin", "admin"), ("urc-writer", "writer")] {
+        store.add_test_resource(Resource {
+            id: resource_id.to_owned(),
+            name: resource_id.to_owned(),
+            resource_id: resource_id.to_owned(),
+            status: "active".to_owned(),
+            ..Resource::default()
+        });
+        store.grant_role(&user.id, resource_id, role);
+    }
+    let signer = Arc::new(Signer::new(
+        SigningKey::generate("test", 2048).expect("key"),
+    ));
+    let service = TokenService::new(
+        TokenConfig {
+            issuer: "https://auth.example.com".to_owned(),
+            audience: vec!["lore-service".to_owned()],
+            auth_service_audience: "auth.example.com".to_owned(),
+            authn_ttl: Duration::from_secs(3600),
+            authz_ttl: Duration::from_secs(900),
+        },
+        store.clone(),
+        store.clone(),
+        store,
+        signer.clone(),
+        None,
+    );
+    let token = service
+        .exchange_authz(
+            VerifiedAuthn {
+                principal: TokenPrincipal {
+                    user_id: user.id.clone(),
+                    token_subject: user.bridge_subject(),
+                    token_idp: "bridge".to_owned(),
+                    ..TokenPrincipal::default()
+                },
+                subject: user.bridge_subject(),
+                user,
+            },
+            &["urc-admin".to_owned(), "urc-writer".to_owned()],
+            None,
+        )
+        .await
+        .expect("signed token");
+    signer
+        .verify(
+            &token.token,
+            VerifyOptions {
+                issuer: "https://auth.example.com".to_owned(),
+                audience: "lore-service".to_owned(),
+            },
+        )
+        .await
+        .expect("verify signed token");
+    let claims = rs256::decode_insecure(&token.token)
+        .expect("decode verified token")
+        .claims;
+    assert_eq!(
+        claims["resources"],
+        serde_json::json!([
+            {"resource_id": "urc-admin", "permission": ["read", "write", "admin"]},
+            {"resource_id": "urc-writer", "permission": ["read", "write"]}
+        ])
+    );
 }
 
 #[tokio::test]
@@ -68,7 +351,7 @@ async fn token_service_mints_authn_with_auth_service_audience_and_verifies_by_jt
 }
 
 #[tokio::test]
-async fn token_service_requires_writer_and_never_emits_lore_admin_permission() {
+async fn token_service_scopes_admin_to_the_authorized_repository() {
     let store = Arc::new(Store::new());
     let user = store.add_test_user(User {
         id: "user-1".to_owned(),
@@ -107,17 +390,59 @@ async fn token_service_requires_writer_and_never_emits_lore_admin_permission() {
         .expect_err("reader must not receive authz token");
     assert!(matches!(err, CoreError::PermissionDenied));
 
-    store.grant_role("user-1", &resource_id, "admin");
+    store.grant_role("user-1", &resource_id, "writer");
     let signed = service
-        .exchange_authz(authn, std::slice::from_ref(&resource_id), None)
+        .exchange_authz(authn.clone(), std::slice::from_ref(&resource_id), None)
         .await
-        .expect("admin bridge role may mint writer-scoped lore token");
-    assert_eq!(signed.lore_resource_id, "urc-repo-1");
+        .expect("writer token");
     assert_eq!(
         signed.permissions,
         vec![Permission::Read, Permission::Write]
     );
-    assert!(!signed.permissions.contains(&Permission::Admin));
+
+    store.grant_role("user-1", &resource_id, "admin");
+    let signed = service
+        .exchange_authz(authn.clone(), std::slice::from_ref(&resource_id), None)
+        .await
+        .expect("admin token");
+    assert_eq!(signed.lore_resource_id, "urc-repo-1");
+    assert_eq!(
+        signed.permissions,
+        vec![Permission::Read, Permission::Write, Permission::Admin]
+    );
+
+    let manual = service
+        .manual_mint_authz("user-1", "game-assets", "writer", None)
+        .await
+        .expect("manual writer token remains restricted");
+    assert_eq!(
+        manual.permissions,
+        vec![Permission::Read, Permission::Write]
+    );
+    let device = service
+        .device_mint_authz("user-1", "game-assets")
+        .await
+        .expect("device token includes admin");
+    assert_eq!(device.permissions, signed.permissions);
+
+    let other = "urc-repo-2";
+    store.add_test_resource(Resource {
+        id: "resource-2".to_owned(),
+        name: "other-assets".to_owned(),
+        lore_repository_id: "repo-2".to_owned(),
+        resource_id: other.to_owned(),
+        status: "active".to_owned(),
+        ..Resource::default()
+    });
+    store.grant_role("user-1", other, "writer");
+    let signed = service
+        .exchange_authz(authn, &[other.to_owned()], None)
+        .await
+        .expect("writer on a different repository");
+    assert_eq!(
+        signed.permissions,
+        vec![Permission::Read, Permission::Write]
+    );
 }
 
 #[tokio::test]
@@ -371,6 +696,25 @@ async fn permission_and_resource_services_wrap_resource_store_and_authz_policy()
     );
     assert_eq!(checked[1].resource_id, "urc-missing");
     assert!(!checked[1].allowed);
+
+    store.grant_role(&user.id, "urc-repo-1", "admin");
+    let checked = permissions
+        .check(&user.id, &["urc-repo-1".to_owned()])
+        .await
+        .expect("check admin permission");
+    assert!(checked[0].allowed);
+    assert_eq!(
+        checked[0].permission,
+        vec![Permission::Read, Permission::Write, Permission::Admin]
+    );
+
+    store.grant_role(&user.id, "urc-repo-1", "reader");
+    let checked = permissions
+        .check(&user.id, &["urc-repo-1".to_owned()])
+        .await
+        .expect("check reader permission");
+    assert!(!checked[0].allowed);
+    assert!(checked[0].permission.is_empty());
 }
 
 #[tokio::test]

@@ -1,14 +1,23 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc, time::Duration};
 
 use authz_core::traits::{TupleFilter, TupleReader};
 use lore_auth_adapters::{
-    authz::{RebacAuthorizationPolicy, SqliteTupleReader},
+    authz::{self, RebacAuthorizationPolicy, SqliteTupleReader},
+    config::AdminConfig,
+    memory,
     sqlite::Store,
 };
 use lore_auth_core::{
     CoreError,
-    model::{AddUserInput, Permission, Resource, ResourceFilter, ResourceID, ResourcePermission},
+    model::{
+        AddUserInput, Permission, Resource, ResourceFilter, ResourceID, ResourcePermission,
+        TokenPrincipal, VerifiedAuthn,
+    },
     ports::{AccountDirectory, AuthorizationPolicy, GrantAdmin, GroupAdmin, ResourceStore},
+    service::{
+        permission::PermissionService,
+        token::{TokenConfig, TokenService},
+    },
 };
 use rusqlite::{Connection as RawConnection, params};
 use tokio_rusqlite::Connection as AsyncConnection;
@@ -19,6 +28,338 @@ use support::{TestStore, migrated_store, raw_connection};
 
 fn rebac(store: &Store) -> RebacAuthorizationPolicy {
     RebacAuthorizationPolicy::from_store(store).expect("rebac policy")
+}
+
+#[tokio::test]
+async fn configured_global_admin_covers_active_existing_and_future_repositories() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let (admin_id, first) = user_with_repo(&fixture, "repo-1").await;
+    let admin = AdminConfig {
+        admin_emails: vec![" Alice@Example.com ".to_owned()],
+        global_repository_admin: false,
+    };
+    let disabled_policy = authz::configured_policy(store, &admin).expect("policy");
+    assert!(
+        !disabled_policy
+            .can_access(&admin_id, &first, "admin")
+            .await
+            .expect("default off")
+    );
+
+    let policy = authz::configured_policy(
+        store,
+        &AdminConfig {
+            global_repository_admin: true,
+            ..admin
+        },
+    )
+    .expect("policy");
+    for action in ["read", "write", "admin"] {
+        assert!(
+            policy
+                .can_access(&admin_id, &first, action)
+                .await
+                .expect("access")
+        );
+    }
+    assert!(
+        !policy
+            .can_access(&admin_id, &first, "obliterate")
+            .await
+            .expect("unknown action")
+    );
+    assert!(
+        !policy
+            .can_access(&admin_id, "urc-missing", "admin")
+            .await
+            .expect("missing repo")
+    );
+    assert!(
+        !policy
+            .can_access("missing-user", &first, "admin")
+            .await
+            .expect("missing user")
+    );
+
+    let second = ResourceID::for_repository_id("repo-2").expect("resource id");
+    store
+        .upsert(Resource {
+            name: "new-repo".to_owned(),
+            lore_repository_id: "repo-2".to_owned(),
+            resource_id: second.clone(),
+            remote_url: "lore://example".to_owned(),
+            ..Resource::default()
+        })
+        .await
+        .expect("new repository");
+    assert!(
+        policy
+            .can_access(&admin_id, &second, "admin")
+            .await
+            .expect("new repo access")
+    );
+
+    let expected_permissions = vec![Permission::Read, Permission::Write, Permission::Admin];
+    let listing = policy
+        .list_accessible(&admin_id, ResourceFilter::default())
+        .await
+        .expect("list");
+    assert_eq!(
+        listing,
+        vec![
+            ResourcePermission {
+                resource_id: first.clone(),
+                permission: expected_permissions.clone()
+            },
+            ResourcePermission {
+                resource_id: second.clone(),
+                permission: expected_permissions.clone()
+            },
+        ]
+    );
+    assert_eq!(
+        policy
+            .list_accessible(
+                &admin_id,
+                ResourceFilter {
+                    prefix: second.clone()
+                }
+            )
+            .await
+            .expect("filtered list"),
+        vec![ResourcePermission {
+            resource_id: second.clone(),
+            permission: expected_permissions.clone()
+        }],
+    );
+    let permission_service = PermissionService::new(Arc::new(store.clone()), policy.clone());
+    let checked = permission_service
+        .check(&admin_id, &[first.clone(), second.clone()])
+        .await
+        .expect("permission check");
+    assert!(
+        checked
+            .iter()
+            .all(|result| result.allowed && result.permission == expected_permissions)
+    );
+    let signer = Arc::new(memory::Store::new());
+    let tokens = TokenService::new(
+        TokenConfig {
+            issuer: "https://auth.example.com".to_owned(),
+            audience: vec!["lore-service".to_owned()],
+            auth_service_audience: "auth.example.com".to_owned(),
+            authn_ttl: Duration::from_secs(3600),
+            authz_ttl: Duration::from_secs(900),
+        },
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
+        policy.clone(),
+        signer,
+        None,
+    );
+    let user = lore_auth_core::ports::AccountQuery::user_by_id(store, &admin_id)
+        .await
+        .expect("admin user");
+    let authn = VerifiedAuthn {
+        subject: user.bridge_subject(),
+        principal: TokenPrincipal {
+            user_id: admin_id.clone(),
+            token_subject: user.bridge_subject(),
+            ..TokenPrincipal::default()
+        },
+        user,
+    };
+    let token = tokens
+        .exchange_authz(authn, std::slice::from_ref(&first), None)
+        .await
+        .expect("authz token");
+    assert_eq!(token.permissions, expected_permissions);
+    let device = tokens
+        .device_mint_authz(&admin_id, "new-repo")
+        .await
+        .expect("device token");
+    assert_eq!(device.permissions, expected_permissions);
+    let manual = tokens
+        .manual_mint_authz(&admin_id, "game-assets", "writer", None)
+        .await
+        .expect("manual token");
+    assert_eq!(
+        manual.permissions,
+        vec![Permission::Read, Permission::Write]
+    );
+
+    let normal = store
+        .add_user(AddUserInput {
+            email: "other@example.com".to_owned(),
+            ..AddUserInput::default()
+        })
+        .await
+        .expect("normal user");
+    assert!(
+        !policy
+            .can_access(&normal.id, &first, "read")
+            .await
+            .expect("no grant")
+    );
+    store
+        .add_grant("user", &normal.id, "game-assets", "writer")
+        .await
+        .expect("writer grant");
+    assert!(
+        policy
+            .can_access(&normal.id, &first, "write")
+            .await
+            .expect("writer")
+    );
+    assert!(
+        !policy
+            .can_access(&normal.id, &first, "admin")
+            .await
+            .expect("not admin")
+    );
+    assert!(
+        !policy
+            .can_access(&normal.id, &second, "read")
+            .await
+            .expect("other repo")
+    );
+    store.add_group("artists", "").await.expect("group");
+    store
+        .add_group_member("artists", &normal.id)
+        .await
+        .expect("group member");
+    store
+        .add_grant("group", "artists", "new-repo", "admin")
+        .await
+        .expect("group grant");
+    assert!(
+        policy
+            .can_access(&normal.id, &second, "admin")
+            .await
+            .expect("group admin")
+    );
+
+    let count: i64 = raw_connection(&fixture.path)
+        .query_row("SELECT COUNT(*) FROM grants", [], |row| row.get(0))
+        .expect("grant count");
+    assert_eq!(count, 2, "implicit permissions must not create grants");
+    store.delete(&second).await.expect("disable repository");
+    assert!(
+        !policy
+            .can_access(&admin_id, &second, "admin")
+            .await
+            .expect("inactive repository")
+    );
+    assert_eq!(
+        policy
+            .list_accessible(&admin_id, ResourceFilter::default())
+            .await
+            .expect("active list")
+            .len(),
+        1
+    );
+    store.disable_user(&admin_id).await.expect("disable admin");
+    assert!(
+        !policy
+            .can_access(&admin_id, &first, "admin")
+            .await
+            .expect("disabled admin")
+    );
+    assert!(
+        policy
+            .list_accessible(&admin_id, ResourceFilter::default())
+            .await
+            .expect("disabled list")
+            .is_empty()
+    );
+    raw_connection(&fixture.path)
+        .execute(
+            "UPDATE users SET status = 'deleted' WHERE id = ?1",
+            params![admin_id],
+        )
+        .expect("delete admin");
+    assert!(
+        !policy
+            .can_access(&admin_id, &first, "admin")
+            .await
+            .expect("deleted admin")
+    );
+    assert!(
+        policy
+            .list_accessible(&admin_id, ResourceFilter::default())
+            .await
+            .expect("deleted list")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn configured_global_admin_propagates_account_and_repository_errors() {
+    let admin = AdminConfig {
+        admin_emails: vec!["alice@example.com".to_owned()],
+        global_repository_admin: true,
+    };
+    let fixture = migrated_store().await;
+    let (user, resource) = user_with_repo(&fixture, "repo-1").await;
+    let policy = authz::configured_policy(&fixture.store, &admin).expect("policy");
+    raw_connection(&fixture.path)
+        .execute("ALTER TABLE users RENAME TO unavailable_users", [])
+        .expect("make user lookup unavailable");
+    assert!(policy.can_access(&user, &resource, "admin").await.is_err());
+    assert!(
+        policy
+            .list_accessible(&user, ResourceFilter::default())
+            .await
+            .is_err()
+    );
+
+    let fixture = migrated_store().await;
+    let (user, resource) = user_with_repo(&fixture, "repo-1").await;
+    let policy = authz::configured_policy(&fixture.store, &admin).expect("policy");
+    raw_connection(&fixture.path)
+        .execute(
+            "ALTER TABLE repositories RENAME TO unavailable_repositories",
+            [],
+        )
+        .expect("make repository lookup unavailable");
+    assert!(policy.can_access(&user, &resource, "admin").await.is_err());
+    assert!(
+        policy
+            .list_accessible(&user, ResourceFilter::default())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn group_admin_is_exposed_by_permission_service_with_sqlite_rebac() {
+    let fixture = migrated_store().await;
+    let (user_id, resource_id) = user_with_repo(&fixture, "repo-1").await;
+    fixture.store.add_group("admins", "").await.expect("group");
+    fixture
+        .store
+        .add_group_member("admins", &user_id)
+        .await
+        .expect("group member");
+    fixture
+        .store
+        .add_grant("group", "admins", "game-assets", "admin")
+        .await
+        .expect("admin grant");
+    let service = PermissionService::new(
+        Arc::new(fixture.store.clone()),
+        Arc::new(rebac(&fixture.store)),
+    );
+    let result = service
+        .check(&user_id, std::slice::from_ref(&resource_id))
+        .await
+        .expect("check");
+    assert!(result[0].allowed);
+    assert_eq!(
+        result[0].permission,
+        vec![Permission::Read, Permission::Write, Permission::Admin]
+    );
 }
 
 fn repository_pk(conn: &RawConnection, repo: &str) -> String {

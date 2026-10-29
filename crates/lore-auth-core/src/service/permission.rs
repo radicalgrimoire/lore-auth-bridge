@@ -18,6 +18,18 @@ pub struct CheckedPermission {
     pub permission: Vec<Permission>,
 }
 
+pub(super) async fn writer_permissions(
+    authz: &dyn AuthorizationPolicy,
+    user_id: &str,
+    resource_id: &str,
+) -> Result<Vec<Permission>, CoreError> {
+    let mut permissions = vec![Permission::Read, Permission::Write];
+    if authz.can_access(user_id, resource_id, "admin").await? {
+        permissions.push(Permission::Admin);
+    }
+    Ok(permissions)
+}
+
 impl PermissionService {
     #[must_use]
     pub fn new(resources: Arc<dyn ResourceStore>, authz: Arc<dyn AuthorizationPolicy>) -> Self {
@@ -42,10 +54,15 @@ impl PermissionService {
                 .authz
                 .can_access(user_id, &resource.resource_id, "write")
                 .await?;
+            let permission = if allowed {
+                writer_permissions(self.authz.as_ref(), user_id, &resource.resource_id).await?
+            } else {
+                Vec::new()
+            };
             out.push(CheckedPermission {
                 resource_id: resource.resource_id,
                 allowed,
-                permission: vec![Permission::Read, Permission::Write],
+                permission,
             });
         }
         Ok(out)

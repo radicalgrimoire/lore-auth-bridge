@@ -146,6 +146,8 @@ async fn get_auth_session_token_issue_failure_is_internal() {
         login,
         tokens: failing_tokens,
         permissions: Arc::new(PermissionService::new(store.clone(), store.clone())),
+        service_accounts: store.clone(),
+        groups: store.clone(),
     });
 
     let start = server
@@ -234,6 +236,40 @@ async fn exchange_flow_mints_resource_token_and_lookup_permissions() {
         .expect("lookup succeeds")
         .into_inner();
     assert_eq!(lookup.resource_permission.len(), 1);
+}
+
+#[tokio::test]
+async fn permission_check_reports_admin_only_for_the_granted_repository() {
+    let (server, store, tokens) = new_test_server();
+    let user = add_alice(&store);
+    let admin_repo = add_game_assets(&store);
+    let writer_repo = store.add_test_resource(Resource {
+        name: "writer-repo".to_owned(),
+        resource_id: "urc-writer".to_owned(),
+        ..Resource::default()
+    });
+    store.grant_role(&user.id, &admin_repo.resource_id, "admin");
+    store.grant_role(&user.id, &writer_repo.resource_id, "writer");
+    let (authn, _) = tokens.mint_authn(&user.id, None).await.expect("authn");
+    let response = server
+        .check_user_permission(auth_request(
+            CheckUserPermissionRequest {
+                resource_id: vec![admin_repo.resource_id, writer_repo.resource_id],
+                target_user: None,
+            },
+            &authn.token,
+        ))
+        .await
+        .expect("permission check")
+        .into_inner();
+    assert_eq!(
+        response.allowed_resource_permission[0].permission,
+        ["read", "write", "admin"]
+    );
+    assert_eq!(
+        response.allowed_resource_permission[1].permission,
+        ["read", "write"]
+    );
 }
 
 #[tokio::test]
@@ -356,6 +392,8 @@ async fn exchange_internal_token_issue_failure_is_internal() {
         )),
         tokens: issuing_tokens,
         permissions: Arc::new(PermissionService::new(store.clone(), store.clone())),
+        service_accounts: store.clone(),
+        groups: store.clone(),
     });
 
     let err = server
@@ -513,6 +551,8 @@ fn new_test_server() -> (UrcAuthServer, Arc<memory::Store>, Arc<TokenService>) {
             login,
             tokens: tokens.clone(),
             permissions,
+            service_accounts: store.clone(),
+            groups: store.clone(),
         }),
         store,
         tokens,

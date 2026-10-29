@@ -26,6 +26,9 @@ impl AccountDirectory for Store {
         let identity = req.identity;
         let key = external_identity_key(&identity);
         let mut state = self.lock();
+        if state.service_accounts.contains_key(&identity.user_id) {
+            return Err(CoreError::PermissionDenied);
+        }
         if let Some(existing) = state
             .identities
             .get(&key)

@@ -64,6 +64,8 @@ The check simulator at `/admin/simulator` runs the configured authorization poli
 
 The simulator also shows grant evidence, including nested group paths, as helper information.
 
+When `admin.global_repository_admin` is enabled, applicable implicit access is labeled as server administrator evidence; it is not a stored grant. See [Configuration](configuration.md#admin).
+
 The policy result is authoritative.
 
 Admin mutations are recorded in `admin_audit`.

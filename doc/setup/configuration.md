@@ -128,6 +128,7 @@ The config validator accepts `https://...` and `ucs-auth://...`.
 admin:
   admin_emails:
     - "admin@example.com"
+  global_repository_admin: false
 ```
 
 `admin_emails` enables the `/admin` Web UI and defines the allowed admin email addresses.
@@ -137,6 +138,10 @@ When this list is omitted or empty, `/admin` is not mounted and returns 404.
 Admins sign in through the configured OIDC login flow first, then open `/admin`.
 
 The addresses are normalized before comparison.
+
+`global_repository_admin` defaults to `false`: UI administration alone does not grant repository access. When explicitly set to `true`, active accounts matching `admin_emails` receive `read`, `write`, and `admin` for every active repository, including repositories added later. This does not create database grants; disabling the option or removing an email removes this implicit access. Existing direct and group grants remain in effect. Unknown actions are not implicitly granted.
+
+Lore `admin` can authorize operations beyond releasing other users' locks. Enable this only for trusted administrators. Restart `lore-auth-server` after changing the setting or email list. Previously issued authz tokens are not revoked by configuration changes and retain their claims until expiry; explicitly issued writer-scoped tokens remain writer-scoped.
 
 See [Admin Web UI](admin-ui.md) for the operational flow and security notes.
 

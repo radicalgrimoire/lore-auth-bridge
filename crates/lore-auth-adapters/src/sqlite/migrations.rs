@@ -11,6 +11,7 @@ const BASELINE_VERSION: &str = "phase2b_baseline_20260702";
 const GROUP_GROUPS_VERSION: &str = "phase3_group_groups_20260702";
 const ADMIN_AUDIT_VERSION: &str = "phase4_admin_audit_20260702";
 const GROUP_NETWORK_CIDRS_VERSION: &str = "phase5_group_network_cidrs_20261020";
+const SERVICE_ACCOUNTS_VERSION: &str = "phase6_service_accounts_20261021";
 
 const BASELINE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -267,6 +268,16 @@ CREATE INDEX IF NOT EXISTS idx_group_network_cidrs_group
 ON group_network_cidrs(group_id);
 "#;
 
+const SERVICE_ACCOUNTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS service_accounts (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  client_id TEXT NOT NULL UNIQUE,
+  secret_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  rotated_at INTEGER NOT NULL
+);
+"#;
+
 impl Store {
     pub async fn migrate(&self) -> Result<()> {
         self.conn
@@ -275,6 +286,7 @@ impl Store {
                 conn.execute_batch(GROUP_GROUPS_SCHEMA)?;
                 conn.execute_batch(ADMIN_AUDIT_SCHEMA)?;
                 conn.execute_batch(GROUP_NETWORK_CIDRS_SCHEMA)?;
+                conn.execute_batch(SERVICE_ACCOUNTS_SCHEMA)?;
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![BASELINE_VERSION, unix_now()],
@@ -291,6 +303,10 @@ impl Store {
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![GROUP_NETWORK_CIDRS_VERSION, unix_now()],
                 )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![SERVICE_ACCOUNTS_VERSION, unix_now()],
+                )?;
                 Ok::<(), rusqlite::Error>(())
             })
             .await?;
@@ -305,6 +321,7 @@ impl Store {
                     GROUP_GROUPS_VERSION,
                     ADMIN_AUDIT_VERSION,
                     GROUP_NETWORK_CIDRS_VERSION,
+                    SERVICE_ACCOUNTS_VERSION,
                 ] {
                     let version = conn
                         .query_row(

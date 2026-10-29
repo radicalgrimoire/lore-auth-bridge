@@ -76,10 +76,7 @@ impl Role {
 
     #[must_use]
     pub fn token_permissions(self) -> Option<Vec<Permission>> {
-        Some(match self {
-            Self::Admin => vec![Permission::Read, Permission::Write],
-            _ => self.permissions()?,
-        })
+        self.permissions()
     }
 
     #[must_use]
@@ -246,6 +243,24 @@ pub struct User {
     pub display_name: String,
     pub status: String,
     pub last_login_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServiceAccount {
+    pub user: User,
+    pub client_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreateServiceAccountInput {
+    pub client_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreatedServiceAccount {
+    pub account: ServiceAccount,
+    pub client_secret: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

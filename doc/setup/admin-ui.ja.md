@@ -66,6 +66,8 @@ nested group 操作は常に使えます。
 
 simulator は nested group path を含む grant 根拠も補助情報として表示します。
 
+`admin.global_repository_admin` が有効で該当する場合、暗黙の権限をサーバー管理者の根拠として表示します。これは保存された grant ではありません。[Configuration](configuration.ja.md#admin) を参照してください。
+
 policy の結果が正です。
 
 admin mutation は `admin_audit` に記録されます。

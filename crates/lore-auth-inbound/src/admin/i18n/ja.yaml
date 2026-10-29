@@ -90,5 +90,6 @@ admin.simulator.repository_not_found: "リポジトリが存在しないか無�
 admin.simulator.evidence: "Grant 根拠"
 admin.simulator.evidence_note: "判定は authorization policy の実行結果です。grant 根拠には direct と nested group path が含まれます。"
 admin.simulator.no_evidence: "該当する grant はありません"
+admin.simulator.global_admin_evidence: "サーバー管理者（全リポジトリの admin 権限が有効）"
 admin.simulator.subject: "Subject"
 admin.simulator.path: "経路"

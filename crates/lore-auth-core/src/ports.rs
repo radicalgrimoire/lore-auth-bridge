@@ -68,6 +68,25 @@ pub trait AccountDirectory: AccountQuery {
 }
 
 #[async_trait]
+pub trait ServiceAccountDirectory: Send + Sync {
+    async fn create_service_account(
+        &self,
+        input: model::CreateServiceAccountInput,
+    ) -> Result<model::CreatedServiceAccount, CoreError>;
+
+    async fn authenticate_service_account(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<model::User, CoreError>;
+
+    async fn rotate_service_account_secret(
+        &self,
+        client_id: &str,
+    ) -> Result<model::CreatedServiceAccount, CoreError>;
+}
+
+#[async_trait]
 pub trait AuthorizationPolicy: Send + Sync {
     async fn can_access(
         &self,

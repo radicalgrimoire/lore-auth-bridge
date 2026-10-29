@@ -1,6 +1,9 @@
 //! ReBAC authorization adapter backed by authz-core.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use authz_core::{
@@ -15,14 +18,14 @@ use authz_core::{
 use lore_auth_core::{
     CoreError,
     model::{self, Permission, ResourceFilter, ResourcePermission},
-    ports::AuthorizationPolicy,
+    ports::{AccountQuery, AuthorizationPolicy, ResourceQuery},
 };
 use tokio_rusqlite::{
     Connection,
     rusqlite::{self, params, params_from_iter},
 };
 
-use crate::{permissions::PermissionSet, sqlite};
+use crate::{config::AdminConfig, permissions::PermissionSet, sqlite};
 
 // Keep the ADR 0008 permission declarations in the schema, but adapter checks
 // use reader/writer/admin relations directly. authz-core 0.1.0 collapses union
@@ -68,6 +71,90 @@ struct SnapshotTupleReader {
 pub struct RebacAuthorizationPolicy {
     reader: SqliteTupleReader,
     provider: StaticPolicyProvider,
+}
+
+pub fn configured_policy(
+    store: &sqlite::Store,
+    admin: &AdminConfig,
+) -> Result<Arc<dyn AuthorizationPolicy>, CoreError> {
+    let rebac: Arc<dyn AuthorizationPolicy> =
+        Arc::new(RebacAuthorizationPolicy::from_store(store)?);
+    if !admin.global_repository_admin || admin.admin_emails.is_empty() {
+        return Ok(rebac);
+    }
+    Ok(Arc::new(GlobalAdminAuthorizationPolicy {
+        inner: rebac,
+        accounts: Arc::new(store.clone()),
+        resources: Arc::new(store.clone()),
+        admin_emails: admin
+            .admin_emails
+            .iter()
+            .map(|email| model::normalize_email(email))
+            .collect(),
+    }))
+}
+
+struct GlobalAdminAuthorizationPolicy {
+    inner: Arc<dyn AuthorizationPolicy>,
+    accounts: Arc<dyn AccountQuery>,
+    resources: Arc<dyn ResourceQuery>,
+    admin_emails: HashSet<String>,
+}
+
+impl GlobalAdminAuthorizationPolicy {
+    async fn is_global_admin(&self, user_id: &str) -> Result<bool, CoreError> {
+        let user = match self.accounts.user_by_id(user_id).await {
+            Ok(user) => user,
+            Err(CoreError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(user.status == "active"
+            && self
+                .admin_emails
+                .contains(&model::normalize_email(&user.email)))
+    }
+}
+
+#[async_trait]
+impl AuthorizationPolicy for GlobalAdminAuthorizationPolicy {
+    async fn can_access(
+        &self,
+        user_id: &str,
+        resource_id: &str,
+        action: &str,
+    ) -> Result<bool, CoreError> {
+        if matches!(action, "read" | "write" | "admin") && self.is_global_admin(user_id).await? {
+            return match self.resources.get_by_resource_id(resource_id).await {
+                Ok(_) => Ok(true),
+                Err(CoreError::NotFound) => Ok(false),
+                Err(error) => Err(error),
+            };
+        }
+        self.inner.can_access(user_id, resource_id, action).await
+    }
+
+    async fn list_accessible(
+        &self,
+        user_id: &str,
+        filter: ResourceFilter,
+    ) -> Result<Vec<ResourcePermission>, CoreError> {
+        if !self.is_global_admin(user_id).await? {
+            return self.inner.list_accessible(user_id, filter).await;
+        }
+        let mut resources = self
+            .resources
+            .list()
+            .await?
+            .into_iter()
+            .filter(|resource| resource.resource_id.starts_with(&filter.prefix))
+            .map(|resource| ResourcePermission {
+                resource_id: resource.resource_id,
+                permission: vec![Permission::Read, Permission::Write, Permission::Admin],
+            })
+            .collect::<Vec<_>>();
+        resources.sort_by(|left, right| left.resource_id.cmp(&right.resource_id));
+        Ok(resources)
+    }
 }
 
 impl SqliteTupleReader {

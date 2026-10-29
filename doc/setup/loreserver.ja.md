@@ -53,6 +53,10 @@ auth_url = "https://localhost:8081"
 
 `lore` CLI は repository 操作時に `epic_urc.UrcAuthApi` へ authz token exchange を要求します。
 
+repository の `admin` grant は Lore の `admin` permission として authz token と権限問い合わせに反映されます。Lore が対応している場合、admin は他の user の file lock を解除できます。これは lock 以外の Lore の admin 操作にも影響するため、grant は信頼できる user や group に限定してください。明示的に writer として手動発行した token は admin permission を含みません。
+
+権限変更は既存の authz token には反映されません。token の期限切れ後または対象 repository の認可情報を更新した後に新しい権限が使われます。
+
 この構成では、bridge config の `lore.auth_url` と同じ `https://localhost:8081` に揃えます。
 
 `RebacApi` は loreserver 専用の service-to-service API として扱います。

@@ -175,7 +175,7 @@ impl DeviceService {
         let repo = self.repository_for_device(&device).await?;
         let signed = self
             .tokens
-            .manual_mint_authz(&device.approved_user_id, &repo.name, "writer", None)
+            .device_mint_authz(&device.approved_user_id, &repo.name)
             .await?;
         self.devices
             .consume_device_authorization(&device.id)

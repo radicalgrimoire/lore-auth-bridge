@@ -141,6 +141,7 @@ pub struct LoreConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     pub admin_emails: Vec<String>,
+    pub global_repository_admin: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

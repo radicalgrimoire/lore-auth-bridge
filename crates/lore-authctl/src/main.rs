@@ -44,6 +44,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: UserCommand,
     },
+    ServiceAccount {
+        #[command(subcommand)]
+        command: ServiceAccountCommand,
+    },
     Group {
         #[command(subcommand)]
         command: GroupCommand,
@@ -101,6 +105,26 @@ pub(crate) enum UserCommand {
     List,
     Disable(UserDisable),
     Enable(UserEnable),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServiceAccountCommand {
+    Add(ServiceAccountAdd),
+    Rotate(ServiceAccountRotate),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServiceAccountAdd {
+    #[arg(long)]
+    pub(crate) client_id: String,
+    #[arg(long, default_value = "")]
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServiceAccountRotate {
+    #[arg(long)]
+    pub(crate) client_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -309,6 +333,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::User { command } => {
             commands::user::run(&config_path, db.as_deref(), command).await?
         }
+        Command::ServiceAccount { command } => {
+            commands::service_account::run(&config_path, db.as_deref(), command).await?
+        }
         Command::Group { command } => {
             commands::group::run(&config_path, db.as_deref(), command).await?
         }
@@ -394,9 +421,8 @@ pub(crate) async fn build_token_service(env: &Env) -> Result<TokenService> {
 }
 
 pub(crate) fn build_authorization_policy(env: &Env) -> Result<Arc<dyn AuthorizationPolicy>> {
-    let policy = authz::RebacAuthorizationPolicy::from_store(env.store.as_ref())
-        .map_err(|err| anyhow!("initialize rebac authz: {err}"))?;
-    Ok(Arc::new(policy))
+    authz::configured_policy(env.store.as_ref(), &env.cfg.admin)
+        .map_err(|err| anyhow!("initialize authz: {err}"))
 }
 
 pub(crate) fn resolve_user_idp(

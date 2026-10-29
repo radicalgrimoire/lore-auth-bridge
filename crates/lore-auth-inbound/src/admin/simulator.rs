@@ -158,6 +158,24 @@ async fn simulator_result(
         }
     }
 
+    if matches!(&decision, Ok(true))
+        && matches!(action, "read" | "write" | "admin")
+        && state.cfg.admin.global_repository_admin
+        && user.status == "active"
+        && state
+            .cfg
+            .admin
+            .admin_emails
+            .iter()
+            .any(|email| model::normalize_email(email) == model::normalize_email(&user.email))
+    {
+        evidence.push(GrantEvidenceRow {
+            subject: format!("user:{}", user.email),
+            role: "admin".to_owned(),
+            path: translate(lang, "admin.simulator.global_admin_evidence"),
+        });
+    }
+
     let (status, detail) = match decision {
         Ok(true) => (
             translate(lang, "admin.simulator.status_allow"),

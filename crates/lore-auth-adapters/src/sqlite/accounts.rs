@@ -31,6 +31,18 @@ impl Store {
         let user_id = resolve_user_id_conn(conn, &identity.email)?;
         let user = user_by_id_conn(conn, &user_id)?;
         active_user(&user)?;
+        if conn
+            .query_row(
+                "SELECT 1 FROM service_accounts WHERE user_id = ?1",
+                params![user.id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(core_from_sql)?
+            .is_some()
+        {
+            return Err(CoreError::PermissionDenied);
+        }
         identity.provider_id = identity.provider_id.trim().to_owned();
         identity.issuer = identity.issuer.trim().to_owned();
         identity.subject = identity.subject.trim().to_owned();
@@ -75,11 +87,20 @@ impl Store {
                status, first_seen_at, last_seen_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
-                identity.id, identity.user_id, identity.provider_id, identity.issuer,
-                identity.subject, identity.subject_strategy, none_if_empty(&identity.email),
-                bool_to_i64(identity.email_verified), none_if_empty(&identity.display_name),
-                none_if_empty(&identity.picture_url), none_if_empty(&identity.hosted_domain),
-                identity.status, now, now
+                identity.id,
+                identity.user_id,
+                identity.provider_id,
+                identity.issuer,
+                identity.subject,
+                identity.subject_strategy,
+                none_if_empty(&identity.email),
+                bool_to_i64(identity.email_verified),
+                none_if_empty(&identity.display_name),
+                none_if_empty(&identity.picture_url),
+                none_if_empty(&identity.hosted_domain),
+                identity.status,
+                now,
+                now
             ],
         )
         .map_err(core_from_sql)?;

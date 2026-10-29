@@ -74,6 +74,7 @@ fn admin_emails_default_to_disabled_and_are_normalized() {
 
     let default_cfg = config::load(&default_path).expect("default config loads");
     assert!(default_cfg.admin.admin_emails.is_empty());
+    assert!(!default_cfg.admin.global_repository_admin);
 
     let raw = default_config(dir.path()).replace(
         "server:",
@@ -84,6 +85,19 @@ fn admin_emails_default_to_disabled_and_are_normalized() {
     let cfg = config::load(&path).expect("admin config loads");
 
     assert_eq!(cfg.admin.admin_emails, ["admin@example.com"]);
+    assert!(!cfg.admin.global_repository_admin);
+
+    let raw = default_config(dir.path()).replace(
+        "server:",
+        "admin:\n  admin_emails: [\"admin@example.com\"]\n  global_repository_admin: true\nserver:",
+    );
+    let path = write_config(dir.path(), raw);
+    assert!(
+        config::load(&path)
+            .expect("opt-in config loads")
+            .admin
+            .global_repository_admin
+    );
 }
 
 #[test]
@@ -398,7 +412,9 @@ lore:
   default_remote_url: "lore://lore.example.com:41337"
 security: {{}}
 "#,
-        dir.join("db.sqlite3").display(),
-        dir.join("keys").display()
+        dir.join("db.sqlite3")
+            .to_string_lossy()
+            .replace('\\', "\\\\"),
+        dir.join("keys").to_string_lossy().replace('\\', "\\\\")
     )
 }

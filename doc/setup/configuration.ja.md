@@ -128,6 +128,7 @@ config validator は `https://...` と `ucs-auth://...` を受け付けます。
 admin:
   admin_emails:
     - "admin@example.com"
+  global_repository_admin: false
 ```
 
 `admin_emails` は `/admin` Web UI を有効化し、許可する admin email address を定義します。
@@ -137,6 +138,10 @@ admin:
 admin は、先に設定済みの OIDC login flow で sign in し、その後 `/admin` を開きます。
 
 address は正規化してから比較されます。
+
+`global_repository_admin` の既定値は `false` です。管理 UI の管理者というだけでは repository 権限は付与されません。明示的に `true` にすると、`admin_emails` に一致する有効な account は、後から追加されるものも含む全ての有効な repository に対して `read`、`write`、`admin` 権限を持ちます。DB に grant は作成されません。設定を無効にするか email を削除すると、この暗黙の権限はなくなります。既存の直接・group grant はそのまま有効です。未知の action は暗黙には許可されません。
+
+Lore の `admin` は他人の lock 解除以外の操作も許可する可能性があります。信頼できる管理者に対してのみ有効にしてください。設定や email list の変更後は `lore-auth-server` を再起動します。発行済み authz token は設定変更で無効化されず、期限まで既存の権限を保持します。明示的に writer として手動発行した token は writer 権限のままです。
 
 運用手順と security note は [管理 Web UI](admin-ui.ja.md) を参照してください。
 

@@ -66,6 +66,7 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AdminConfig {
     pub admin_emails: Vec<String>,
+    pub global_repository_admin: bool,
     pub allowed_peer_cidrs: Vec<IpNet>,
 }
 

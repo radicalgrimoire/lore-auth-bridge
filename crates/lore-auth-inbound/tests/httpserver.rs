@@ -709,6 +709,57 @@ async fn admin_simulator_posts_real_policy_result_and_grant_evidence() {
 }
 
 #[tokio::test]
+async fn admin_simulator_explains_implicit_global_admin_access() {
+    let fixture = new_sqlite_admin_app_with_global_admin(true).await;
+    let csrf = admin_csrf(
+        fixture.app.clone(),
+        &fixture.admin_cookie,
+        "/admin/simulator",
+    )
+    .await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            "/admin/simulator",
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}&user=admin@example.com&resource=game-assets&action=admin"),
+        ))
+        .await
+        .expect("simulator response");
+    let body = response_text(response).await;
+    assert!(body.contains("Allow"), "{body}");
+    assert!(
+        body.contains("Server administrator (global repository admin enabled)"),
+        "{body}"
+    );
+
+    let csrf = admin_csrf(
+        fixture.app.clone(),
+        &fixture.admin_cookie,
+        "/admin/simulator",
+    )
+    .await;
+    let response = fixture
+        .app
+        .oneshot(post_form_request(
+            "/admin/simulator",
+            Some(fixture.admin_cookie),
+            &format!(
+                "csrf_token={csrf}&user=admin@example.com&resource=game-assets&action=obliterate"
+            ),
+        ))
+        .await
+        .expect("simulator response");
+    let body = response_text(response).await;
+    assert!(body.contains("Deny"), "{body}");
+    assert!(
+        !body.contains("Server administrator (global repository admin enabled)"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn admin_simulator_evidence_includes_nested_groups() {
     let fixture = new_sqlite_admin_app().await;
     add_nested_only_fixture(&fixture).await;
@@ -1513,6 +1564,10 @@ impl Drop for TestDir {
 }
 
 async fn new_sqlite_admin_app() -> SqliteAdminApp {
+    new_sqlite_admin_app_with_global_admin(false).await
+}
+
+async fn new_sqlite_admin_app_with_global_admin(global_repository_admin: bool) -> SqliteAdminApp {
     let dir = TestDir::new();
     let path = dir.path.join("auth.sqlite3");
     let store = Arc::new(sqlite::Store::open(&path).await.expect("open sqlite"));
@@ -1551,8 +1606,14 @@ async fn new_sqlite_admin_app() -> SqliteAdminApp {
         .expect("add grant");
 
     let resource_store: Arc<dyn ResourceStore> = store.clone();
-    let authz_policy: Arc<dyn AuthorizationPolicy> =
-        Arc::new(authz::RebacAuthorizationPolicy::from_store(store.as_ref()).expect("rebac authz"));
+    let authz_policy = authz::configured_policy(
+        store.as_ref(),
+        &lore_auth_adapters::config::AdminConfig {
+            admin_emails: vec![ADMIN_EMAIL.to_owned()],
+            global_repository_admin,
+        },
+    )
+    .expect("configured authz");
     let signer_store = Arc::new(memory::Store::new());
     let tokens = Arc::new(TokenService::new(
         TokenConfig {
@@ -1577,7 +1638,9 @@ async fn new_sqlite_admin_app() -> SqliteAdminApp {
             lore_auth_url: "ucs-auth://auth.example.com".to_owned(),
             default_remote_url: "lore://lore.example.com:41337".to_owned(),
             session_ttl: Duration::from_secs(60 * 60),
-            admin: admin_config(),
+            admin: admin_config_with(|admin| {
+                admin.global_repository_admin = global_repository_admin
+            }),
         },
         Services {
             login: None,
