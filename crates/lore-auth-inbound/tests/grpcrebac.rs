@@ -4,7 +4,10 @@ use http::{Request, Response};
 use lore_auth_adapters::memory;
 use lore_auth_core::{
     model::User,
-    service::{resource::ResourceService, token::{TokenConfig, TokenService}},
+    service::{
+        resource::ResourceService,
+        token::{TokenConfig, TokenService},
+    },
 };
 use lore_auth_inbound::grpcrebac::{
     RebacPeerAllowlistLayer, RebacServer, default_allowed_peer_cidrs, parse_allowed_peer_cidrs,
@@ -229,17 +232,21 @@ fn test_server(store: Arc<memory::Store>) -> (RebacServer, Arc<TokenService>) {
         store.clone(),
         Some(store.clone()),
     ));
-    (RebacServer::new(
-        resources,
-        tokens.clone(),
-        vec!["admin@example.com".to_owned()],
-    ), tokens)
+    (
+        RebacServer::new(
+            resources,
+            tokens.clone(),
+            vec!["admin@example.com".to_owned()],
+        ),
+        tokens,
+    )
 }
 
 fn auth_request<T>(message: T, token: &str) -> GrpcRequest<T> {
     let mut request = GrpcRequest::new(message);
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().expect("header"));
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("header"),
+    );
     request
 }

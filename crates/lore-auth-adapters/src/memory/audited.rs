@@ -8,18 +8,28 @@ use ipnet::IpNet;
 use lore_auth_core::{
     CoreError,
     model::{
-        AddInvitationInput, AddUserInput, Grant, GrantEvidence, Group, IdentityInvitation,
-        LoginBindingResult, LoginResolutionRequest, Resource, TokenPrincipal, User, UserListFilter,
+        AddInvitationInput, AddUserInput, AddUserWithIdentityInput, ExternalIdentity, Grant,
+        GrantEvidence, Group, IdentityInvitation, LoginBindingResult, LoginResolutionRequest,
+        Resource, TokenPrincipal, User, UserListFilter,
     },
     ports::{
         AccountDirectory, AccountQuery, AdminWritePortFactory, AdminWritePorts, GrantAdmin,
-        GrantQuery, GroupAdmin, GroupQuery, ResourceQuery, ResourceStore,
+        GrantQuery, GroupAdmin, GroupQuery, MaintenanceAdmin, RepositoryAdmin, ResourceQuery,
+        ResourceStore, ServiceAccountAdmin,
     },
 };
 
 use super::{
-    Store, admin_audit_entry, grant_detail, group_group_would_cycle, normalize_resource_for_upsert,
-    resolve_grant_subject_id, resolve_group_id, resolve_resource_id_for_repo, resolve_user_id,
+    Store,
+    accounts::{
+        add_user_with_identity_locked, update_entra_identity_locked,
+        update_user_display_name_locked,
+    },
+    admin_audit_entry, grant_detail,
+    grants::{add_user_grants_locked, change_user_grants_locked, set_user_repository_roles_locked},
+    group_group_would_cycle, normalize_resource_for_upsert, resolve_grant_subject_id,
+    resolve_group_id, resolve_resource_id_for_repo, resolve_user_id,
+    service_accounts::create_service_account_locked,
     validated_account_email,
 };
 
@@ -52,10 +62,94 @@ impl AdminWritePortFactory for AuditedStoreFactory {
         let audited = Arc::new(self.store.audited(actor.to_owned()));
         AdminWritePorts {
             accounts: audited.clone(),
+            service_accounts: audited.clone(),
             resources: audited.clone(),
+            repository_admin: audited.clone(),
+            maintenance: audited.clone(),
             groups: audited.clone(),
             grants: audited,
         }
+    }
+}
+
+#[async_trait]
+impl MaintenanceAdmin for AuditedStore {
+    async fn get(&self) -> Result<lore_auth_core::model::MaintenanceSettings, CoreError> {
+        Ok(self.inner.lock().maintenance.clone())
+    }
+
+    async fn set(
+        &self,
+        enabled: bool,
+        wait_minutes: u32,
+    ) -> Result<lore_auth_core::model::MaintenanceSettings, CoreError> {
+        if wait_minutes == 0 {
+            return Err(CoreError::InvalidArgument(
+                "wait time must be at least one minute".into(),
+            ));
+        }
+        let mut state = self.inner.lock();
+        let enabled_at = if enabled {
+            if state.maintenance.enabled {
+                state.maintenance.enabled_at
+            } else {
+                super::now_unix()
+            }
+        } else {
+            0
+        };
+        state.maintenance = lore_auth_core::model::MaintenanceSettings {
+            enabled,
+            enabled_at,
+            wait_minutes,
+        };
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "maintenance.update",
+            "server",
+            "maintenance",
+            format!("enabled={enabled} wait_minutes={wait_minutes}"),
+        ));
+        Ok(state.maintenance.clone())
+    }
+}
+
+#[async_trait]
+impl ServiceAccountAdmin for AuditedStore {
+    async fn create_service_account_in_group(
+        &self,
+        input: lore_auth_core::model::CreateServiceAccountInput,
+        group_id: &str,
+    ) -> Result<lore_auth_core::model::CreatedServiceAccount, CoreError> {
+        let mut state = self.inner.lock();
+        let group = state
+            .groups
+            .values()
+            .find(|group| group.id == group_id)
+            .ok_or(CoreError::NotFound)?;
+        let resolved = group.id.clone();
+        let group_name = group.name.clone();
+        let created = create_service_account_locked(&mut state, input)?;
+        state
+            .group_members
+            .entry(created.account.user.id.clone())
+            .or_default()
+            .push(group_name);
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "service_account.add",
+            "service_account",
+            created.account.user.id.clone(),
+            format!("client_id={}", created.account.client_id),
+        ));
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "group.member.add",
+            "group",
+            resolved,
+            format!("user={}", created.account.user.id),
+        ));
+        Ok(created)
     }
 }
 
@@ -268,6 +362,85 @@ fn normalize_group_cidr(value: &str) -> Result<String, CoreError> {
 
 #[async_trait]
 impl GrantAdmin for AuditedStore {
+    async fn set_user_repository_roles(
+        &self,
+        user_id: &str,
+        repositories: &[lore_auth_core::model::DirectRepositoryRoles],
+    ) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        let (added, removed) = set_user_repository_roles_locked(&mut state, user_id, repositories)?;
+        for grant in &added {
+            state.admin_audit.push(admin_audit_entry(
+                &self.actor,
+                "grant.add",
+                "grant",
+                grant.id.clone(),
+                grant_detail("user", user_id, &grant.repository_id, &grant.role),
+            ));
+        }
+        for (grant, repo) in &removed {
+            state.admin_audit.push(admin_audit_entry(
+                &self.actor,
+                "grant.remove",
+                "grant",
+                format!("user:{user_id}:{repo}:{}", grant.role),
+                grant_detail("user", user_id, repo, &grant.role),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn change_user_grants(
+        &self,
+        user_id: &str,
+        selected: &[String],
+        original: &[lore_auth_core::model::DirectRepositoryGrant],
+        role: &str,
+    ) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        let (added, removed) =
+            change_user_grants_locked(&mut state, user_id, selected, original, role)?;
+        for grant in &added {
+            state.admin_audit.push(admin_audit_entry(
+                &self.actor,
+                "grant.add",
+                "grant",
+                grant.id.clone(),
+                grant_detail("user", user_id, &grant.repository_id, role),
+            ));
+        }
+        for (grant, repo) in &removed {
+            state.admin_audit.push(admin_audit_entry(
+                &self.actor,
+                "grant.remove",
+                "grant",
+                format!("user:{user_id}:{repo}:{}", grant.role),
+                grant_detail("user", user_id, repo, &grant.role),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn add_user_grants(
+        &self,
+        user_id: &str,
+        resource_ids: &[String],
+        role: &str,
+    ) -> Result<Vec<Grant>, CoreError> {
+        let mut state = self.inner.lock();
+        let grants = add_user_grants_locked(&mut state, user_id, resource_ids, role)?;
+        for grant in &grants {
+            state.admin_audit.push(admin_audit_entry(
+                &self.actor,
+                "grant.add",
+                "grant",
+                grant.id.clone(),
+                grant_detail("user", user_id, &grant.repository_id, role),
+            ));
+        }
+        Ok(grants)
+    }
+
     async fn add_grant(
         &self,
         subject_type: &str,
@@ -355,6 +528,46 @@ impl GrantQuery for AuditedStore {
 
 #[async_trait]
 impl AccountDirectory for AuditedStore {
+    async fn update_entra_identity(
+        &self,
+        input: lore_auth_core::model::UpdateEntraIdentityInput,
+    ) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        update_entra_identity_locked(&mut state, &input)?;
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "user.update_identity",
+            "user",
+            input.user_id.clone(),
+            format!(
+                "identity_id={} provider_id={} issuer={} old_subject={} new_subject={}",
+                input.identity_id,
+                input.provider_id,
+                input.issuer,
+                input.expected_subject,
+                input.subject
+            ),
+        ));
+        Ok(())
+    }
+
+    async fn update_user_display_name(
+        &self,
+        user_id: &str,
+        display_name: &str,
+    ) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        update_user_display_name_locked(&mut state, user_id, display_name)?;
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "user.update_display_name",
+            "user",
+            user_id,
+            format!("display_name={}", display_name.trim()),
+        ));
+        Ok(())
+    }
+
     async fn resolve_login(
         &self,
         req: LoginResolutionRequest,
@@ -399,6 +612,32 @@ impl AccountDirectory for AuditedStore {
             format!("email={}", user.email),
         ));
         Ok(user)
+    }
+
+    async fn add_user_with_identity(
+        &self,
+        input: AddUserWithIdentityInput,
+    ) -> Result<(User, ExternalIdentity), CoreError> {
+        let mut state = self.inner.lock();
+        let (user, identity) = add_user_with_identity_locked(&mut state, input)?;
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "user.add",
+            "user",
+            user.id.clone(),
+            format!("email={}", user.email),
+        ));
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "user.bind_identity",
+            "user",
+            user.id.clone(),
+            format!(
+                "provider_id={} issuer={} subject={}",
+                identity.provider_id, identity.issuer, identity.subject
+            ),
+        ));
+        Ok((user, identity))
     }
 
     async fn add_invitation(
@@ -486,6 +725,13 @@ impl AccountDirectory for AuditedStore {
 
 #[async_trait]
 impl AccountQuery for AuditedStore {
+    async fn external_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ExternalIdentity>, CoreError> {
+        self.inner.external_identities_for_user(user_id).await
+    }
+
     async fn user_by_id(&self, user_id: &str) -> Result<User, CoreError> {
         self.inner.user_by_id(user_id).await
     }
@@ -536,6 +782,220 @@ impl ResourceStore for AuditedStore {
             "repository",
             id,
             String::new(),
+        ));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RepositoryAdmin for AuditedStore {
+    async fn list_all(&self) -> Result<Vec<Resource>, CoreError> {
+        let mut resources = self
+            .inner
+            .lock()
+            .resources
+            .values()
+            .filter(|resource| resource.status == "active" || resource.status == "disabled")
+            .cloned()
+            .collect::<Vec<_>>();
+        resources.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(resources)
+    }
+
+    async fn get(&self, resource_id: &str) -> Result<Resource, CoreError> {
+        self.inner
+            .lock()
+            .resources
+            .get(resource_id)
+            .filter(|resource| resource.status == "active" || resource.status == "disabled")
+            .cloned()
+            .ok_or(CoreError::NotFound)
+    }
+
+    async fn list_grants(&self, resource_id: &str) -> Result<Vec<Grant>, CoreError> {
+        let state = self.inner.lock();
+        let repo = state
+            .resources
+            .get(resource_id)
+            .ok_or(CoreError::NotFound)?;
+        let mut grants = Vec::new();
+        for ((subject_type, subject_id), resources) in &state.grants {
+            if let Some(role) = resources.get(resource_id) {
+                grants.push(Grant {
+                    subject_type: subject_type.clone(),
+                    subject_id: subject_id.clone(),
+                    repository_id: repo.id.clone(),
+                    role: role.clone(),
+                    ..Grant::default()
+                });
+            }
+        }
+        grants.sort_by(|a, b| {
+            (&a.subject_type, &a.subject_id, &a.role).cmp(&(
+                &b.subject_type,
+                &b.subject_id,
+                &b.role,
+            ))
+        });
+        Ok(grants)
+    }
+
+    async fn add_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> Result<(), CoreError> {
+        self.mutate_repository_grant(resource_id, subject_type, subject, role, true)
+    }
+
+    async fn remove_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> Result<(), CoreError> {
+        self.mutate_repository_grant(resource_id, subject_type, subject, role, false)
+    }
+
+    async fn set_enabled(&self, resource_id: &str, enabled: bool) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        if !enabled && !state.maintenance.enabled {
+            return Err(CoreError::InvalidArgument(
+                "maintenance mode is required to disable a repository".into(),
+            ));
+        }
+        let resource = state
+            .resources
+            .get_mut(resource_id)
+            .ok_or(CoreError::NotFound)?;
+        let (expected, desired, action) = if enabled {
+            ("disabled", "active", "repository.enable")
+        } else {
+            ("active", "disabled", "repository.disable")
+        };
+        if resource.status != expected {
+            return Err(CoreError::InvalidArgument(format!(
+                "repository must be {expected}"
+            )));
+        }
+        resource.status = desired.into();
+        let name = resource.name.clone();
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            action,
+            "repository",
+            resource_id.to_owned(),
+            name,
+        ));
+        Ok(())
+    }
+
+    async fn clear_grants(&self, resource_id: &str) -> Result<u64, CoreError> {
+        let mut state = self.inner.lock();
+        if !state.maintenance.enabled {
+            return Err(CoreError::InvalidArgument(
+                "maintenance mode is required to clear repository grants".into(),
+            ));
+        }
+        let repo = state
+            .resources
+            .get(resource_id)
+            .ok_or(CoreError::NotFound)?;
+        if repo.status != "disabled" {
+            return Err(CoreError::InvalidArgument(
+                "repository must be disabled before clearing grants".into(),
+            ));
+        }
+        let name = repo.name.clone();
+        let mut count = 0_u64;
+        for grants in state.grants.values_mut() {
+            if grants.remove(resource_id).is_some() {
+                count += 1;
+            }
+        }
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "repository.grants.clear",
+            "repository",
+            resource_id,
+            format!("name={name} count={count}"),
+        ));
+        Ok(count)
+    }
+
+    async fn delete_disabled(&self, resource_id: &str) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        let resource = state
+            .resources
+            .get(resource_id)
+            .ok_or(CoreError::NotFound)?;
+        if resource.status != "disabled" {
+            return Err(CoreError::InvalidArgument(
+                "repository must be disabled before deletion".into(),
+            ));
+        }
+        let name = resource.name.clone();
+        state.resources.remove(resource_id);
+        for grants in state.grants.values_mut() {
+            grants.remove(resource_id);
+        }
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "repository.delete",
+            "repository",
+            resource_id.to_owned(),
+            name,
+        ));
+        Ok(())
+    }
+}
+
+impl AuditedStore {
+    fn mutate_repository_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+        add: bool,
+    ) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        let repo = state
+            .resources
+            .get(resource_id)
+            .filter(|repo| repo.status == "active")
+            .ok_or(CoreError::NotFound)?;
+        let name = repo.name.clone();
+        let subject_id = resolve_grant_subject_id(&state, subject_type, subject)?;
+        if !lore_auth_core::model::is_known_role(role) {
+            return Err(CoreError::InvalidArgument(format!(
+                "unknown grant role {role:?}"
+            )));
+        }
+        let grants = state
+            .grants
+            .entry((subject_type.to_owned(), subject_id.clone()))
+            .or_default();
+        if add {
+            if grants.contains_key(resource_id) {
+                return Err(CoreError::InvalidArgument("grant already exists".into()));
+            }
+            grants.insert(resource_id.to_owned(), role.to_owned());
+        } else {
+            if grants.get(resource_id).map(String::as_str) != Some(role) {
+                return Err(CoreError::NotFound);
+            }
+            grants.remove(resource_id);
+        }
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            if add { "grant.add" } else { "grant.remove" },
+            "grant",
+            format!("{subject_type}:{subject_id}:{resource_id}:{role}"),
+            grant_detail(subject_type, &subject_id, &name, role),
         ));
         Ok(())
     }

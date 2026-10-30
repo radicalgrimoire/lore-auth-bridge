@@ -1,21 +1,15 @@
 <section id="repositories-results">
-  {% if rows.len() >= limit %}
-  <p>{{ self.t("admin.list.limit_note") }} {{ limit }}</p>
-  {% endif %}
   {% if rows.is_empty() %}
   <p>{{ self.t("admin.repositories.empty") }}</p>
   {% else %}
   <table>
-    <thead>
-      <tr>
-        <th scope="col">{{ self.t("admin.repositories.name") }}</th>
-        <th scope="col">{{ self.t("admin.repositories.lore_repository_id") }}</th>
-        <th scope="col">{{ self.t("admin.repositories.resource_id") }}</th>
-        <th scope="col">{{ self.t("admin.common.status") }}</th>
-        <th scope="col">{{ self.t("admin.repositories.grants") }}</th>
-        <th scope="col">{{ self.t("admin.common.actions") }}</th>
-      </tr>
-    </thead>
+    <thead><tr>
+      <th scope="col">{{ self.t("admin.repositories.name") }}</th>
+      <th scope="col">{{ self.t("admin.repositories.lore_repository_id") }}</th>
+      <th scope="col">{{ self.t("admin.repositories.resource_id") }}</th>
+      <th scope="col">{{ self.t("admin.common.status") }}</th>
+      <th scope="col">{{ self.t("admin.users.access") }}</th>
+    </tr></thead>
     <tbody>
       {% for repo in rows %}
       <tr>
@@ -23,33 +17,7 @@
         <td>{{ repo.lore_repository_id }}</td>
         <td>{{ repo.resource_id }}</td>
         <td>{{ repo.status }}</td>
-        <td>
-          {% if repo.grants.is_empty() %}
-          {{ self.t("admin.repositories.no_grants") }}
-          {% else %}
-          <ul>
-            {% for grant in repo.grants %}
-            <li>
-              {{ grant.subject }}: {{ grant.role }}
-              <form method="post" action="/admin/repositories/grants/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="repo" value="{{ repo.name }}">
-                <input type="hidden" name="subject_type" value="{{ grant.subject_type }}">
-                <input type="hidden" name="subject_id" value="{{ grant.subject_id }}">
-                <input type="hidden" name="role" value="{{ grant.role }}">
-                <button type="submit">{{ self.t("admin.common.remove") }}</button>
-              </form>
-            </li>
-            {% endfor %}
-          </ul>
-          {% endif %}
-        </td>
-        <td>
-          <form method="post" action="/admin/repositories/{{ repo.resource_id_path }}/disable" hx-confirm='{{ self.t("admin.common.confirm") }}'>
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit">{{ self.t("admin.common.disable") }}</button>
-          </form>
-        </td>
+        <td><a href="/admin/repositories/{{ repo.resource_id_path }}/access">{{ self.t("admin.users.access_link") }}</a></td>
       </tr>
       {% endfor %}
     </tbody>

@@ -47,13 +47,6 @@ pub(crate) async fn run(
             }
         },
         GroupCommand::Nest { command } => match command {
-            GroupNestCommand::Add(args) => {
-                groups
-                    .add_group_group(&args.parent_group, &args.member_group)
-                    .await
-                    .map_err(core_error)?;
-                println!("ok");
-            }
             GroupNestCommand::Remove(args) => {
                 groups
                     .remove_group_group(&args.parent_group, &args.member_group)

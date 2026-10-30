@@ -1,0 +1,99 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ self.t("admin.groups.access_title") }}{% endblock %}
+{% block content %}
+<section>
+  <p><a href="/admin/groups">{{ self.t("admin.groups.back") }}</a></p>
+  <h1>{{ self.t("admin.groups.access_title") }}</h1>
+  <p>{{ group.name }} ({{ group.id }})</p>
+</section>
+<section>
+  <h2>{{ self.t("admin.groups.search_title") }}</h2>
+  <form method="get" action="/admin/groups/{{ group.id_path }}/access">
+    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.groups.search_members") }}' aria-label='{{ self.t("admin.groups.search_members") }}'>
+    <button type="submit">{{ self.t("admin.search.submit") }}</button>
+  </form>
+</section>
+<section>
+  <h2>{{ self.t("admin.groups.member_add") }}</h2>
+  <form method="post" action="/admin/groups/{{ group.id_path }}/members/add">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="text" name="user" required placeholder='{{ self.t("admin.groups.user") }}' aria-label='{{ self.t("admin.groups.user") }}'>
+    <button type="submit">{{ self.t("admin.common.add") }}</button>
+  </form>
+</section>
+<section>
+  <h2>{{ self.t("admin.groups.members") }}</h2>
+  {% if members.is_empty() %}
+  {% if query.is_empty() %}<p>{{ self.t("admin.groups.no_members") }}</p>{% else %}<p>{{ self.t("admin.groups.no_matching_members") }}</p>{% endif %}
+  {% else %}
+  <table>
+    <thead><tr>
+      <th scope="col">{{ self.t("admin.users.email") }}</th>
+      <th scope="col">{{ self.t("admin.users.display_name") }}</th>
+      <th scope="col">{{ self.t("admin.groups.user_id") }}</th>
+      <th scope="col">{{ self.t("admin.common.status") }}</th>
+      <th scope="col">{{ self.t("admin.users.access") }}</th>
+      <th scope="col">{{ self.t("admin.common.actions") }}</th>
+    </tr></thead>
+    <tbody>
+      {% for member in members %}
+      <tr>
+        <td>{{ member.email }}</td>
+        <td>{{ member.display_name }}</td>
+        <td>{{ member.id }}</td>
+        <td>{{ member.status }}</td>
+        <td><a href="/admin/users/{{ member.id_path }}/access">{{ self.t("admin.users.access_link") }}</a></td>
+        <td><form method="post" action="/admin/groups/{{ group.id_path }}/members/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="user" value="{{ member.id }}">
+          <button type="submit">{{ self.t("admin.common.remove") }}</button>
+        </form></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+<section>
+  <h2>{{ self.t("admin.groups.cidrs") }}</h2>
+  <p>{{ self.t("admin.groups.cidr_help") }}</p>
+  <form method="post" action="/admin/groups/{{ group.id_path }}/cidrs/add">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>{{ self.t("admin.groups.cidr_input") }}
+      <input type="text" name="cidr" required placeholder="192.0.2.0/24">
+    </label>
+    <button type="submit">{{ self.t("admin.common.add") }}</button>
+  </form>
+  {% if allowed_cidrs.is_empty() %}
+  <p>{{ self.t("admin.groups.no_cidrs") }}</p>
+  {% else %}
+  <ul>
+    {% for cidr in allowed_cidrs %}
+    <li>{{ cidr }}
+      <form method="post" action="/admin/groups/{{ group.id_path }}/cidrs/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="cidr" value="{{ cidr }}">
+        <button type="submit">{{ self.t("admin.common.remove") }}</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% if !nested_groups.is_empty() %}
+<section>
+  <h2>{{ self.t("admin.groups.nested_groups") }}</h2>
+  <ul>
+    {% for nested in nested_groups %}
+    <li>{{ nested.name }}
+      <form method="post" action="/admin/groups/{{ group.id_path }}/nests/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="member_group" value="{{ nested.id }}">
+        <button type="submit">{{ self.t("admin.common.remove") }}</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

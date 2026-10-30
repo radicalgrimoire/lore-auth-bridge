@@ -15,5 +15,6 @@ pub mod grpcauth;
 pub mod grpcrebac;
 
 pub mod httpserver;
+pub mod repository_client;
 
 pub mod ratelimit;

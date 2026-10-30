@@ -44,6 +44,10 @@ pub enum CoreError {
     #[error("token issue failed")]
     TokenIssueFailed,
 
+    /// Token issuance is unavailable during maintenance.
+    #[error("token issuance is disabled during maintenance")]
+    MaintenanceMode,
+
     /// A device flow code does not exist.
     #[error("device invalid code")]
     DeviceInvalidCode,

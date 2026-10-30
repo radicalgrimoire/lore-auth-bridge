@@ -8,17 +8,28 @@
     <button type="submit">{{ self.t("admin.search.submit") }}</button>
   </form>
 </section>
+{% if !entra_providers.is_empty() %}
 <section>
-  <h2>{{ self.t("admin.users.invite") }}</h2>
-  <form method="post" action="/admin/users/invite">
+  <h2>{{ self.t("admin.users.add_entra") }}</h2>
+  <p>{{ self.t("admin.users.add_entra_help") }}</p>
+  <form method="post" action="/admin/users/entra">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="provider_id" value="google" aria-label='{{ self.t("admin.users.provider_id") }}'>
-    <input type="url" name="issuer" value="https://accounts.google.com" aria-label='{{ self.t("admin.users.issuer") }}'>
-    <input type="email" name="email" placeholder='{{ self.t("admin.users.email") }}' aria-label='{{ self.t("admin.users.email") }}'>
+    {% if entra_providers.len() == 1 %}
+    <input type="hidden" name="provider_id" value="{{ entra_providers[0].id }}">
+    {% else %}
+    <select name="provider_id" aria-label='{{ self.t("admin.users.provider_id") }}' required>
+      {% for provider in entra_providers %}
+      <option value="{{ provider.id }}">{{ provider.display_name }} ({{ provider.id }})</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    <input type="email" name="email" required placeholder='{{ self.t("admin.users.email") }}' aria-label='{{ self.t("admin.users.email") }}'>
     <input type="text" name="display_name" placeholder='{{ self.t("admin.users.display_name") }}' aria-label='{{ self.t("admin.users.display_name") }}'>
-    <button type="submit">{{ self.t("admin.users.invite") }}</button>
+    <input type="text" name="object_id" required autocomplete="off" spellcheck="false" placeholder='{{ self.t("admin.users.object_id") }}' aria-label='{{ self.t("admin.users.object_id") }}'>
+    <button type="submit">{{ self.t("admin.users.add") }}</button>
   </form>
 </section>
+{% endif %}
 <section>
   <details>
     <summary>{{ self.t("admin.users.add_advanced") }}</summary>

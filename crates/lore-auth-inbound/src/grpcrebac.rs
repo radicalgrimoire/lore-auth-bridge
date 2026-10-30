@@ -117,7 +117,9 @@ impl RebacServer {
         if self.admin_emails.contains(&email.to_ascii_lowercase()) {
             Ok(())
         } else {
-            Err(Status::permission_denied("global admin permission is required"))
+            Err(Status::permission_denied(
+                "global admin permission is required",
+            ))
         }
     }
 }

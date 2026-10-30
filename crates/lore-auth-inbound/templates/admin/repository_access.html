@@ -1,0 +1,86 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ self.t("admin.repositories.access_title") }}{% endblock %}
+{% block content %}
+<section>
+  <p><a href="/admin/repositories">{{ self.t("admin.repositories.back") }}</a></p>
+  <h1>{{ self.t("admin.repositories.access_title") }}</h1>
+  <p>{{ repository.name }} ({{ repository.resource_id }}) — {{ repository.status }}</p>
+  <p>{{ self.t("admin.repositories.direct_grants_note") }}</p>
+</section>
+<section>
+  <h2>{{ self.t("admin.repositories.search_grants") }}</h2>
+  <form method="get" action="/admin/repositories/{{ repository.resource_id_path }}/access">
+    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.repositories.search_grants") }}' aria-label='{{ self.t("admin.repositories.search_grants") }}'>
+    <button type="submit">{{ self.t("admin.search.submit") }}</button>
+  </form>
+</section>
+{% if repository.status == "active" %}
+<section>
+  <h2>{{ self.t("admin.grants.add") }}</h2>
+  <form method="post" action="/admin/repositories/{{ repository.resource_id_path }}/grants/add">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>{{ self.t("admin.grants.subject_type") }}
+      <select name="subject_type"><option value="user">user</option><option value="group">group</option></select>
+    </label>
+    <label>{{ self.t("admin.repositories.subject_input") }}
+      <input type="text" name="subject_id" required>
+    </label>
+    <label>{{ self.t("admin.grants.role") }}
+      <select name="role"><option value="reader">reader</option><option value="writer">writer</option><option value="admin">admin</option></select>
+    </label>
+    <button type="submit">{{ self.t("admin.common.add") }}</button>
+  </form>
+</section>
+{% endif %}
+<section>
+  <h2>{{ self.t("admin.repositories.grants") }}</h2>
+  {% if grants.is_empty() %}
+  <p>{{ self.t("admin.repositories.no_grants") }}</p>
+  {% else %}
+  <table>
+    <thead><tr><th>{{ self.t("admin.grants.subject_type") }}</th><th>{{ self.t("admin.repositories.subject") }}</th><th>{{ self.t("admin.grants.subject_id") }}</th><th>{{ self.t("admin.grants.role") }}</th><th>{{ self.t("admin.common.actions") }}</th></tr></thead>
+    <tbody>{% for grant in grants %}
+      <tr><td>{{ grant.subject_type }}</td><td>{{ grant.subject }}</td><td>{{ grant.subject_id }}</td><td>{{ grant.role }}</td><td>
+      {% if repository.status == "active" %}
+        <form method="post" action="/admin/repositories/{{ repository.resource_id_path }}/grants/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="subject_type" value="{{ grant.subject_type }}">
+          <input type="hidden" name="subject_id" value="{{ grant.subject_id }}">
+          <input type="hidden" name="role" value="{{ grant.role }}">
+          <button type="submit">{{ self.t("admin.common.remove") }}</button>
+        </form>
+      {% endif %}
+      </td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% endif %}
+</section>
+<section>
+  <details>
+    <summary>{{ self.t("admin.repositories.manage") }}</summary>
+    <p>{{ self.t("admin.repositories.auth_only_warning") }}</p>
+    {% if repository.status == "active" %}
+    {% if !maintenance_enabled %}<p>{{ self.t("admin.repositories.maintenance_required") }}</p>{% endif %}
+    <form method="post" action="/admin/repositories/{{ repository.resource_id_path }}/disable" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" {% if !maintenance_enabled %}disabled{% endif %}>{{ self.t("admin.common.disable") }}</button>
+    </form>
+    {% else if repository.status == "disabled" %}
+    <form method="post" action="/admin/repositories/{{ repository.resource_id_path }}/enable">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">{{ self.t("admin.repositories.enable") }}</button>
+    </form>
+    {% if has_grants %}
+    <form method="post" action="/admin/repositories/{{ repository.resource_id_path }}/grants/clear" hx-confirm='{{ self.t("admin.common.confirm") }}'>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><input type="checkbox" name="confirm" value="yes" required>{{ self.t("admin.repositories.confirm_clear_grants") }}</label>
+      <button type="submit" {% if !maintenance_enabled %}disabled{% endif %}>{{ self.t("admin.repositories.clear_grants") }}</button>
+    </form>
+    {% else %}
+    <p>{{ self.t("admin.repositories.no_grants") }}</p>
+    {% endif %}
+    <p>{{ self.t("admin.repositories.delete_unavailable") }}</p>
+    {% endif %}
+  </details>
+</section>
+{% endblock %}

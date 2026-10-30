@@ -1,4 +1,4 @@
-//! Generated Rust bindings for the Lore UCS Auth and ReBAC gRPC protocols.
+//! Generated Rust bindings for the Lore repository, UCS Auth, and ReBAC gRPC protocols.
 //!
 //! This crate owns tonic/prost code generation from `third_party/lore-proto`.
 //! Runtime code should depend on these modules instead of hand-written protocol
@@ -17,6 +17,14 @@ pub mod ucs {
         //! `ucs.auth.RebacApi` messages and tonic client/server types.
 
         tonic::include_proto!("ucs.auth");
+    }
+}
+
+pub mod lore {
+    pub mod repository {
+        pub mod v1 {
+            tonic::include_proto!("lore.repository.v1");
+        }
     }
 }
 

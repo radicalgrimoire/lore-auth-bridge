@@ -11,7 +11,7 @@ use lore_auth_core::{
     ports::{
         AccountDirectory, AccountQuery, AdminAuditLog, AuthorizationPolicy,
         DeviceAuthorizationStore, GrantAdmin, GrantQuery, GroupAdmin, GroupQuery, IssuedTokenLog,
-        ResourceStore, StateStore, TokenSigner,
+        ResourceStore, ServiceAccountAdmin, ServiceAccountDirectory, StateStore, TokenSigner,
     },
 };
 
@@ -37,6 +37,118 @@ where
 #[test]
 fn memory_store_implements_core_test_double_ports() {
     assert_core_ports::<Store>();
+}
+
+#[tokio::test]
+async fn audited_memory_service_account_creation_joins_group_without_logging_secret() {
+    let store = Store::new();
+    let group = store.add_group("ci", "").await.unwrap();
+    let input = |client_id: &str| lore_auth_core::model::CreateServiceAccountInput {
+        client_id: client_id.into(),
+        display_name: "CI Account".into(),
+    };
+    let audited = store.audited("admin");
+    assert!(
+        audited
+            .create_service_account_in_group(input("missing"), "missing")
+            .await
+            .is_err()
+    );
+    let created = audited
+        .create_service_account_in_group(input("ci-runner"), &group.id)
+        .await
+        .unwrap();
+    let auth = store
+        .authenticate_service_account("ci-runner", &created.client_secret)
+        .await
+        .unwrap();
+    assert_eq!(auth.id, created.account.user.id);
+    assert_eq!(
+        store.list_group_members(&group.id).await.unwrap()[0].id,
+        auth.id
+    );
+    let entries = store.admin_audit_entries();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.detail.contains(&created.client_secret))
+    );
+    assert!(
+        audited
+            .create_service_account_in_group(input("ci-runner"), &group.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_group_members(&group.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn audited_memory_entra_update_reindexes_and_rejects_conflicts() {
+    let store = Store::new();
+    let make_input = |email: &str, subject: &str| lore_auth_core::model::AddUserWithIdentityInput {
+        email: email.to_owned(),
+        display_name: email.to_owned(),
+        provider_id: "entra".to_owned(),
+        issuer: "https://example.com".to_owned(),
+        subject: subject.to_owned(),
+        subject_strategy: "entra_oid_tid".to_owned(),
+    };
+    let audited = store.audited("admin");
+    let (user, identity) = audited
+        .add_user_with_identity(make_input("a@example.com", "tenant:old"))
+        .await
+        .unwrap();
+    audited
+        .add_user_with_identity(make_input("b@example.com", "tenant:other"))
+        .await
+        .unwrap();
+    let mut input = lore_auth_core::model::UpdateEntraIdentityInput {
+        user_id: user.id.clone(),
+        identity_id: identity.id,
+        provider_id: "entra".to_owned(),
+        issuer: "https://example.com".to_owned(),
+        expected_subject: "tenant:old".to_owned(),
+        subject: "tenant:other".to_owned(),
+    };
+    assert!(matches!(
+        audited.update_entra_identity(input.clone()).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    input.subject = "tenant:new".to_owned();
+    audited.update_entra_identity(input.clone()).await.unwrap();
+    assert!(matches!(
+        audited.update_entra_identity(input).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    let request = |subject: &str| LoginResolutionRequest {
+        identity: ExternalIdentity {
+            provider_id: "entra".to_owned(),
+            issuer: "https://example.com".to_owned(),
+            subject: subject.to_owned(),
+            ..ExternalIdentity::default()
+        },
+        policy: LoginTrustPolicy::default(),
+    };
+    assert!(matches!(
+        store.resolve_login(request("tenant:old")).await,
+        Err(CoreError::NotFound)
+    ));
+    assert_eq!(
+        store
+            .resolve_login(request("tenant:new"))
+            .await
+            .unwrap()
+            .0
+            .user_id,
+        user.id
+    );
+    assert!(
+        store
+            .admin_audit_entries()
+            .iter()
+            .any(|entry| entry.action == "user.update_identity")
+    );
 }
 
 #[tokio::test]
@@ -74,6 +186,187 @@ async fn audited_memory_group_and_grant_writes_record_admin_audit() {
     assert_eq!(entries[1].action, "grant.add");
     assert_eq!(entries[1].object_type, "grant");
     assert!(!entries[1].detail.contains("token"));
+}
+
+#[tokio::test]
+async fn audited_memory_bulk_user_grants_are_atomic_and_preserve_existing_roles() {
+    let store = Store::new();
+    let user = store.add_test_user(User {
+        email: "bulk@example.com".into(),
+        ..Default::default()
+    });
+    for name in ["one", "two", "existing"] {
+        store.add_test_resource(Resource {
+            name: name.into(),
+            lore_repository_id: name.into(),
+            ..Default::default()
+        });
+    }
+    store
+        .add_grant("user", &user.id, "existing", "writer")
+        .await
+        .unwrap();
+    let audited = store.audited("admin");
+    let ids = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("urc-{name}"))
+            .collect::<Vec<_>>()
+    };
+    for (selected, role) in [
+        (ids(&["one", "missing"]), "reader"),
+        (ids(&["one", "one"]), "reader"),
+        (ids(&["one", "existing"]), "reader"),
+        (ids(&["one", "two"]), "invalid"),
+        (vec![], "reader"),
+    ] {
+        assert!(
+            audited
+                .add_user_grants(&user.id, &selected, role)
+                .await
+                .is_err()
+        );
+        assert!(store.list_grants("one").await.unwrap().is_empty());
+        assert!(store.admin_audit_entries().is_empty());
+    }
+    assert_eq!(
+        store.list_grants("existing").await.unwrap()[0].role,
+        "writer"
+    );
+    assert_eq!(
+        audited
+            .add_user_grants(&user.id, &ids(&["one", "two"]), "admin")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(store.list_grants("one").await.unwrap()[0].role, "admin");
+    let entries = store.admin_audit_entries();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.actor == "admin" && entry.action == "grant.add")
+    );
+}
+
+#[tokio::test]
+async fn audited_memory_set_repository_roles_changes_and_removes_direct_roles() {
+    let store = Store::new();
+    let user = store.add_test_user(User {
+        email: "roles@example.com".into(),
+        ..Default::default()
+    });
+    for name in ["one", "two"] {
+        store.add_test_resource(Resource {
+            name: name.into(),
+            lore_repository_id: name.into(),
+            ..Default::default()
+        });
+    }
+    store
+        .add_grant("user", &user.id, "one", "writer")
+        .await
+        .unwrap();
+    let mut changes = vec![
+        lore_auth_core::model::DirectRepositoryRoles {
+            resource_id: "urc-one".into(),
+            expected_roles: vec!["reader".into()],
+            desired_roles: vec!["admin".into()],
+        },
+        lore_auth_core::model::DirectRepositoryRoles {
+            resource_id: "urc-two".into(),
+            expected_roles: vec![],
+            desired_roles: vec!["reader".into()],
+        },
+    ];
+    let audited = store.audited("admin");
+    assert!(
+        audited
+            .set_user_repository_roles(&user.id, &changes)
+            .await
+            .is_err()
+    );
+    assert!(store.list_grants("two").await.unwrap().is_empty());
+    changes[0].expected_roles = vec!["writer".into()];
+    audited
+        .set_user_repository_roles(&user.id, &changes)
+        .await
+        .unwrap();
+    assert_eq!(store.list_grants("one").await.unwrap()[0].role, "admin");
+    assert_eq!(store.list_grants("two").await.unwrap()[0].role, "reader");
+    assert_eq!(store.admin_audit_entries().len(), 3);
+    changes[0].expected_roles = vec!["admin".into()];
+    changes[0].desired_roles.clear();
+    changes[1].expected_roles = vec!["reader".into()];
+    audited
+        .set_user_repository_roles(&user.id, &changes)
+        .await
+        .unwrap();
+    assert!(store.list_grants("one").await.unwrap().is_empty());
+    assert_eq!(store.admin_audit_entries().len(), 4);
+}
+
+#[tokio::test]
+async fn audited_memory_change_user_grants_checks_stale_roles_and_preserves_groups() {
+    let store = Store::new();
+    let user = store.add_test_user(User {
+        email: "change@example.com".into(),
+        ..Default::default()
+    });
+    for name in ["old", "new"] {
+        store.add_test_resource(Resource {
+            name: name.into(),
+            lore_repository_id: name.into(),
+            ..Default::default()
+        });
+    }
+    store.add_group("team", "").await.unwrap();
+    store.add_group_member("team", &user.id).await.unwrap();
+    store
+        .add_grant("group", "team", "old", "reader")
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &user.id, "old", "writer")
+        .await
+        .unwrap();
+    let removal = |role: &str| lore_auth_core::model::DirectRepositoryGrant {
+        resource_id: "urc-old".into(),
+        role: role.into(),
+    };
+    let audited = store.audited("admin");
+    let additions = ["urc-new".to_owned()];
+    assert!(
+        audited
+            .change_user_grants(&user.id, &additions, &[removal("reader")], "writer")
+            .await
+            .is_err()
+    );
+    assert!(
+        audited
+            .change_user_grants(
+                &user.id,
+                &["urc-old".into(), "urc-new".into()],
+                &[removal("reader")],
+                "writer"
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.list_grants("new").await.unwrap().is_empty());
+    assert!(store.admin_audit_entries().is_empty());
+    audited
+        .change_user_grants(&user.id, &additions, &[removal("writer")], "reader")
+        .await
+        .unwrap();
+    let old = store.list_grants("old").await.unwrap();
+    assert_eq!(old.len(), 1);
+    assert_eq!(old[0].subject_type, "group");
+    assert!(store.can_access(&user.id, "urc-old", "read").await.unwrap());
+    assert_eq!(store.list_grants("new").await.unwrap()[0].role, "reader");
+    assert_eq!(store.admin_audit_entries().len(), 2);
 }
 
 #[tokio::test]

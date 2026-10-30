@@ -95,7 +95,11 @@ impl TokenSigner for Store {
 #[async_trait]
 impl IssuedTokenLog for Store {
     async fn record(&self, token: IssuedToken) -> Result<(), CoreError> {
-        self.lock().issued_tokens.insert(token.jti.clone(), token);
+        let mut state = self.lock();
+        if state.maintenance.enabled {
+            return Err(CoreError::MaintenanceMode);
+        }
+        state.issued_tokens.insert(token.jti.clone(), token);
         Ok(())
     }
 }

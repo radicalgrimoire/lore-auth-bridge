@@ -7,13 +7,15 @@ use lore_auth_adapters::{
 use lore_auth_core::{
     CoreError,
     model::{
-        AddInvitationInput, AddUserInput, ExternalIdentity, IssuedToken, LoginResolutionRequest,
-        LoginStateInput, LoginTrustPolicy, Resource, ResourceID, SigningKeyMeta, UserListFilter,
+        AddInvitationInput, AddUserInput, AddUserWithIdentityInput, ExternalIdentity, IssuedToken,
+        LoginResolutionRequest, LoginStateInput, LoginTrustPolicy, Resource, ResourceID,
+        SigningKeyMeta, UserListFilter,
     },
     ports::{
         AccountDirectory, AccountQuery, AdminAuditLog, AuthorizationPolicy,
         DeviceAuthorizationStore, GrantAdmin, GrantQuery, GroupAdmin, GroupQuery, IssuedTokenLog,
-        ResourceQuery, ResourceStore, SigningKeyAdmin, StateStore,
+        ResourceQuery, ResourceStore, ServiceAccountAdmin, ServiceAccountDirectory,
+        SigningKeyAdmin, StateStore,
     },
 };
 use rusqlite::params;
@@ -60,6 +62,459 @@ fn sqlite_store_implements_requested_core_ports() {
 }
 
 #[tokio::test]
+async fn repository_management_rolls_back_on_audit_failure() {
+    use lore_auth_core::ports::{MaintenanceAdmin, RepositoryAdmin};
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    store
+        .upsert(Resource {
+            name: "test-repo".into(),
+            lore_repository_id: "test-id".into(),
+            ..Resource::default()
+        })
+        .await
+        .unwrap();
+    let user = store
+        .add_user(AddUserInput {
+            email: "alice@example.com".into(),
+            display_name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &user.id, "test-repo", "reader")
+        .await
+        .unwrap();
+    let audited = store.audited("admin");
+    let id = "urc-test-id";
+    MaintenanceAdmin::set(&audited, true, 15).await.unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(matches!(
+        RepositoryAdmin::set_enabled(&audited, id, false).await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert_eq!(store.get_by_resource_id(id).await.unwrap().status, "active");
+    assert!(matches!(
+        RepositoryAdmin::remove_grant(&audited, id, "user", &user.id, "reader").await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert_eq!(store.list_grants("test-repo").await.unwrap().len(), 1);
+    raw_connection(&fixture.path)
+        .execute_batch("DROP TRIGGER fail_admin_audit")
+        .unwrap();
+    RepositoryAdmin::set_enabled(&audited, id, false)
+        .await
+        .unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(matches!(
+        RepositoryAdmin::set_enabled(&audited, id, true).await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert!(matches!(
+        RepositoryAdmin::delete_disabled(&audited, id).await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert_eq!(
+        RepositoryAdmin::get(&audited, id).await.unwrap().status,
+        "disabled"
+    );
+    assert_eq!(
+        RepositoryAdmin::list_grants(&audited, id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    raw_connection(&fixture.path)
+        .execute_batch("DROP TRIGGER fail_admin_audit")
+        .unwrap();
+    RepositoryAdmin::delete_disabled(&audited, id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        RepositoryAdmin::get(&audited, id).await,
+        Err(CoreError::NotFound)
+    ));
+    assert!(store.list_grants("").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn maintenance_stops_issuance_and_scopes_bulk_grant_removal() {
+    use lore_auth_core::ports::{MaintenanceAdmin, RepositoryAdmin};
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let audited = store.audited("admin");
+    let user = store
+        .add_user(AddUserInput {
+            email: "maintenance@example.com".into(),
+            display_name: "Maintenance".into(),
+        })
+        .await
+        .unwrap();
+    for (name, id) in [("first", "first-id"), ("second", "second-id")] {
+        store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: id.into(),
+                ..Resource::default()
+            })
+            .await
+            .unwrap();
+        store
+            .add_grant("user", &user.id, name, "reader")
+            .await
+            .unwrap();
+    }
+    let id = "urc-first-id";
+    assert!(matches!(
+        RepositoryAdmin::set_enabled(&audited, id, false).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    let first = IssuedToken {
+        jti: "before-maintenance".into(),
+        kind: "authz".into(),
+        ..IssuedToken::default()
+    };
+    IssuedTokenLog::record(store, first).await.unwrap();
+    let settings = MaintenanceAdmin::set(&audited, true, 15).await.unwrap();
+    assert!(settings.enabled);
+    assert!(settings.enabled_at > 0);
+    assert!(matches!(
+        IssuedTokenLog::record(
+            store,
+            IssuedToken {
+                jti: "during-maintenance".into(),
+                ..IssuedToken::default()
+            }
+        )
+        .await,
+        Err(CoreError::MaintenanceMode)
+    ));
+    assert!(matches!(
+        RepositoryAdmin::clear_grants(&audited, id).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    RepositoryAdmin::set_enabled(&audited, id, false)
+        .await
+        .unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(matches!(
+        RepositoryAdmin::clear_grants(&audited, id).await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert_eq!(
+        RepositoryAdmin::list_grants(&audited, id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    raw_connection(&fixture.path)
+        .execute_batch("DROP TRIGGER fail_admin_audit")
+        .unwrap();
+    assert_eq!(
+        RepositoryAdmin::clear_grants(&audited, id).await.unwrap(),
+        1
+    );
+    assert!(
+        RepositoryAdmin::list_grants(&audited, id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.list_grants("second").await.unwrap().len(), 1);
+    let updated = MaintenanceAdmin::set(&audited, true, 30).await.unwrap();
+    assert_eq!(updated.enabled_at, settings.enabled_at);
+    assert_eq!(updated.wait_minutes, 30);
+    RepositoryAdmin::set_enabled(&audited, id, true)
+        .await
+        .unwrap();
+    MaintenanceAdmin::set(&audited, false, 30).await.unwrap();
+    IssuedTokenLog::record(
+        store,
+        IssuedToken {
+            jti: "after-maintenance".into(),
+            ..IssuedToken::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn repository_admin_hides_legacy_deleted_registrations() {
+    use lore_auth_core::ports::RepositoryAdmin;
+    let fixture = migrated_store().await;
+    for (name, id) in [
+        ("active", "active-id"),
+        ("disabled", "disabled-id"),
+        ("deleted", "deleted-id"),
+    ] {
+        fixture
+            .store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: id.into(),
+                ..Resource::default()
+            })
+            .await
+            .unwrap();
+    }
+    let conn = raw_connection(&fixture.path);
+    conn.execute(
+        "UPDATE repositories SET status = 'disabled' WHERE name = 'disabled'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE repositories SET status = 'deleted' WHERE name = 'deleted'",
+        [],
+    )
+    .unwrap();
+    let audited = fixture.store.audited("admin");
+    let rows = RepositoryAdmin::list_all(&audited).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|repo| repo.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["active", "disabled"]
+    );
+    assert!(matches!(
+        RepositoryAdmin::get(&audited, "urc-deleted-id").await,
+        Err(CoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn audited_group_cidr_changes_roll_back_on_audit_failure() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let group = store.add_group("network", "").await.unwrap();
+    store
+        .add_group_allowed_cidr(&group.id, "192.0.2.0/24")
+        .await
+        .unwrap();
+    let audited = store.audited("admin");
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(matches!(
+        audited
+            .add_group_allowed_cidr(&group.id, "198.51.100.0/24")
+            .await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert!(matches!(
+        audited
+            .remove_group_allowed_cidr(&group.id, "192.0.2.0/24")
+            .await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert_eq!(
+        store.list_group_allowed_cidrs(&group.id).await.unwrap(),
+        ["192.0.2.0/24"]
+    );
+    assert!(store.list_admin_audit().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn migration_removes_existing_group_nests_once_and_audits_atomically() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let parent = store.add_group("parent", "").await.unwrap();
+    let child = store.add_group("child", "").await.unwrap();
+    let user = store
+        .add_user(AddUserInput {
+            email: "member@example.com".into(),
+            display_name: "Member".into(),
+        })
+        .await
+        .unwrap();
+    store.add_group_member(&child.name, &user.id).await.unwrap();
+    store.add_group_group(&parent.id, &child.id).await.unwrap();
+    store
+        .add_group_allowed_cidr(&parent.id, "192.0.2.0/24")
+        .await
+        .unwrap();
+    let resource_id = ResourceID::for_repository_id("migration-repo").unwrap();
+    store
+        .upsert(Resource {
+            name: "migration-repo".into(),
+            lore_repository_id: "migration-repo".into(),
+            remote_url: "lore://example".into(),
+            resource_id: resource_id.clone(),
+            ..Resource::default()
+        })
+        .await
+        .unwrap();
+    store
+        .add_grant("group", &parent.id, "migration-repo", "reader")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.list_user_allowed_cidrs(&user.id).await.unwrap(),
+        vec!["192.0.2.0/24"]
+    );
+    assert_eq!(
+        store
+            .grants_for_user_on_repository(&user.id, &resource_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let connection = raw_connection(&fixture.path);
+    connection
+        .execute(
+            "DELETE FROM schema_migrations WHERE version = ?1",
+            params!["phase7_remove_existing_group_nests_20261030"],
+        )
+        .unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(store.migrate().await.is_err());
+    assert_eq!(store.list_group_groups(&parent.id).await.unwrap().len(), 1);
+    assert!(store.list_admin_audit().await.unwrap().is_empty());
+    assert_eq!(
+        store.list_user_allowed_cidrs(&user.id).await.unwrap(),
+        vec!["192.0.2.0/24"]
+    );
+    assert_eq!(
+        store
+            .grants_for_user_on_repository(&user.id, &resource_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_admin_audit")
+        .unwrap();
+
+    store.migrate().await.unwrap();
+    assert!(
+        store
+            .list_group_groups(&parent.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.list_group_members(&child.id).await.unwrap()[0].id,
+        user.id
+    );
+    assert!(
+        store
+            .list_user_allowed_cidrs(&user.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .grants_for_user_on_repository(&user.id, &resource_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.list_group_allowed_cidrs(&parent.id).await.unwrap(),
+        vec!["192.0.2.0/24"]
+    );
+    let audit = store.list_admin_audit().await.unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].actor, "migration");
+    assert_eq!(audit[0].action, "group.nest.remove");
+    assert_eq!(audit[0].object_id, parent.id);
+    assert_eq!(audit[0].detail, format!("member_group={}", child.id));
+    store.validate_schema().await.unwrap();
+
+    store.add_group_group(&parent.id, &child.id).await.unwrap();
+    store.migrate().await.unwrap();
+    assert_eq!(store.list_group_groups(&parent.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_admin_audit().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn audited_sqlite_service_account_creation_is_atomic_and_does_not_log_secret() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let group = store.add_group("ci", "").await.unwrap();
+    let input = |client_id: &str| lore_auth_core::model::CreateServiceAccountInput {
+        client_id: client_id.into(),
+        display_name: "CI Account".into(),
+    };
+    let audited = store.audited("admin@example.com");
+    assert!(
+        audited
+            .create_service_account_in_group(input("missing"), "missing")
+            .await
+            .is_err()
+    );
+    assert!(
+        audited
+            .create_service_account_in_group(input("bad id"), &group.id)
+            .await
+            .is_err()
+    );
+    raw_connection(&fixture.path)
+        .execute_batch(
+            "CREATE TRIGGER fail_second_account_audit BEFORE INSERT ON admin_audit
+         WHEN NEW.action = 'group.member.add'
+         BEGIN SELECT RAISE(FAIL, 'audit offline'); END;",
+        )
+        .unwrap();
+    assert!(
+        audited
+            .create_service_account_in_group(input("ci-runner"), &group.id)
+            .await
+            .is_err()
+    );
+    let conn = raw_connection(&fixture.path);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM service_accounts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(store.list_admin_audit().await.unwrap().is_empty());
+    conn.execute_batch("DROP TRIGGER fail_second_account_audit")
+        .unwrap();
+    let created = audited
+        .create_service_account_in_group(input("ci-runner"), &group.id)
+        .await
+        .unwrap();
+    let auth = store
+        .authenticate_service_account("ci-runner", &created.client_secret)
+        .await
+        .unwrap();
+    assert_eq!(auth.id, created.account.user.id);
+    assert_eq!(
+        store.list_group_members(&group.id).await.unwrap()[0].id,
+        auth.id
+    );
+    let entries = store.list_admin_audit().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.actor == "admin@example.com"
+                && !entry.detail.contains(&created.client_secret))
+    );
+    assert!(
+        audited
+            .create_service_account_in_group(input("ci-runner"), &group.id)
+            .await
+            .is_err()
+    );
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
 async fn audited_sqlite_grant_write_records_admin_audit() {
     let fixture = migrated_store().await;
     let store = fixture.store.clone();
@@ -94,6 +549,366 @@ async fn audited_sqlite_grant_write_records_admin_audit() {
     assert_eq!(entries[0].object_type, "grant");
     assert_eq!(entries[0].object_id, grant.id);
     assert!(entries[0].detail.contains("repo=game-assets"));
+}
+
+#[tokio::test]
+async fn audited_sqlite_bulk_user_grants_are_atomic_and_preserve_existing_roles() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let user = store
+        .add_user(AddUserInput {
+            email: "bulk@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for name in ["one", "two", "existing"] {
+        store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: name.into(),
+                remote_url: "lore://example".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    store
+        .add_grant("user", &user.id, "existing", "writer")
+        .await
+        .unwrap();
+    let audited = store.audited("admin");
+    let ids = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("urc-{name}"))
+            .collect::<Vec<_>>()
+    };
+    for (selected, role) in [
+        (ids(&["one", "missing"]), "reader"),
+        (ids(&["one", "one"]), "reader"),
+        (ids(&["one", "existing"]), "reader"),
+        (ids(&["one", "two"]), "invalid"),
+        (vec![], "reader"),
+    ] {
+        assert!(
+            audited
+                .add_user_grants(&user.id, &selected, role)
+                .await
+                .is_err()
+        );
+        assert!(store.list_grants("one").await.unwrap().is_empty());
+        assert!(store.list_admin_audit().await.unwrap().is_empty());
+    }
+    assert_eq!(
+        store.list_grants("existing").await.unwrap()[0].role,
+        "writer"
+    );
+    let grants = audited
+        .add_user_grants(&user.id, &ids(&["one", "two"]), "admin")
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 2);
+    assert_eq!(store.list_grants("one").await.unwrap()[0].role, "admin");
+    let entries = store.list_admin_audit().await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.actor == "admin" && entry.action == "grant.add")
+    );
+}
+
+#[tokio::test]
+async fn audited_sqlite_bulk_user_grants_roll_back_on_audit_failure() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let user = store
+        .add_user(AddUserInput {
+            email: "bulk@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for name in ["one", "two"] {
+        store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: name.into(),
+                remote_url: "lore://example".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    raw_connection(&fixture.path)
+        .execute_batch(
+            "CREATE TRIGGER fail_second_admin_audit BEFORE INSERT ON admin_audit
+             WHEN (SELECT COUNT(*) FROM admin_audit) > 0
+             BEGIN SELECT RAISE(FAIL, 'audit offline'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .audited("admin")
+            .add_user_grants(&user.id, &["urc-one".into(), "urc-two".into()], "writer")
+            .await
+            .is_err()
+    );
+    assert!(store.list_grants("one").await.unwrap().is_empty());
+    assert!(store.list_grants("two").await.unwrap().is_empty());
+    assert!(store.list_admin_audit().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audited_sqlite_set_repository_roles_is_atomic_and_preserves_unchanged_multiple_roles() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let user = store
+        .add_user(AddUserInput {
+            email: "roles@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for name in ["one", "two"] {
+        store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: name.into(),
+                remote_url: "lore://example".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    store
+        .add_grant("user", &user.id, "one", "reader")
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &user.id, "one", "writer")
+        .await
+        .unwrap();
+    let mut changes = vec![
+        lore_auth_core::model::DirectRepositoryRoles {
+            resource_id: "urc-one".into(),
+            expected_roles: vec!["reader".into(), "writer".into()],
+            desired_roles: vec!["reader".into(), "writer".into()],
+        },
+        lore_auth_core::model::DirectRepositoryRoles {
+            resource_id: "urc-two".into(),
+            expected_roles: vec![],
+            desired_roles: vec!["admin".into()],
+        },
+    ];
+    let audited = store.audited("admin");
+    audited
+        .set_user_repository_roles(&user.id, &changes)
+        .await
+        .unwrap();
+    assert_eq!(store.list_grants("one").await.unwrap().len(), 2);
+    assert_eq!(store.list_admin_audit().await.unwrap().len(), 1);
+    changes[0].desired_roles = vec!["admin".into()];
+    changes[1].expected_roles = vec!["reader".into()];
+    assert!(
+        audited
+            .set_user_repository_roles(&user.id, &changes)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_grants("one").await.unwrap().len(), 2);
+    changes[1].expected_roles = vec!["admin".into()];
+    raw_connection(&fixture.path).execute_batch("CREATE TRIGGER fail_role_audit BEFORE INSERT ON admin_audit WHEN NEW.action = 'grant.add' BEGIN SELECT RAISE(FAIL, 'audit offline'); END;").unwrap();
+    assert!(
+        audited
+            .set_user_repository_roles(&user.id, &changes)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_grants("one").await.unwrap().len(), 2);
+    assert_eq!(store.list_admin_audit().await.unwrap().len(), 1);
+    raw_connection(&fixture.path)
+        .execute_batch("DROP TRIGGER fail_role_audit")
+        .unwrap();
+    audited
+        .set_user_repository_roles(&user.id, &changes)
+        .await
+        .unwrap();
+    let roles = store.list_grants("one").await.unwrap();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].role, "admin");
+    assert_eq!(store.list_admin_audit().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn audited_sqlite_change_user_grants_checks_stale_roles_and_rolls_back_audit_failure() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let user = store
+        .add_user(AddUserInput {
+            email: "change@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for name in ["old", "new"] {
+        store
+            .upsert(Resource {
+                name: name.into(),
+                lore_repository_id: name.into(),
+                remote_url: "lore://example".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    store
+        .add_grant("user", &user.id, "old", "reader")
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &user.id, "old", "writer")
+        .await
+        .unwrap();
+    let removal = |role: &str| lore_auth_core::model::DirectRepositoryGrant {
+        resource_id: "urc-old".into(),
+        role: role.into(),
+    };
+    let audited = store.audited("admin");
+    let additions = ["urc-new".to_owned()];
+    assert!(
+        audited
+            .change_user_grants(&user.id, &additions, &[removal("reader")], "writer")
+            .await
+            .is_err()
+    );
+    assert!(
+        audited
+            .change_user_grants(
+                &user.id,
+                &["urc-old".into(), "urc-new".into()],
+                &[removal("reader")],
+                "writer"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_grants("old").await.unwrap().len(), 2);
+    assert!(store.list_grants("new").await.unwrap().is_empty());
+    raw_connection(&fixture.path)
+        .execute_batch(
+            "CREATE TRIGGER fail_removal_audit BEFORE INSERT ON admin_audit
+         WHEN NEW.action = 'grant.remove'
+         BEGIN SELECT RAISE(FAIL, 'audit offline'); END;",
+        )
+        .unwrap();
+    assert!(
+        audited
+            .change_user_grants(
+                &user.id,
+                &additions,
+                &[removal("reader"), removal("writer")],
+                "writer"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list_grants("old").await.unwrap().len(), 2);
+    assert!(store.list_grants("new").await.unwrap().is_empty());
+    assert!(store.list_admin_audit().await.unwrap().is_empty());
+    raw_connection(&fixture.path)
+        .execute_batch("DROP TRIGGER fail_removal_audit")
+        .unwrap();
+    audited
+        .change_user_grants(
+            &user.id,
+            &additions,
+            &[removal("reader"), removal("writer")],
+            "writer",
+        )
+        .await
+        .unwrap();
+    assert!(store.list_grants("old").await.unwrap().is_empty());
+    assert_eq!(store.list_grants("new").await.unwrap()[0].role, "writer");
+    let entries = store.list_admin_audit().await.unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.action == "grant.remove")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn audited_display_name_update_rolls_back_if_audit_fails() {
+    let fixture = migrated_store().await;
+    let user = fixture
+        .store
+        .add_user(AddUserInput {
+            email: "name@example.com".to_owned(),
+            display_name: "Original".to_owned(),
+        })
+        .await
+        .unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    let result = fixture
+        .store
+        .audited("test")
+        .update_user_display_name(&user.id, "Changed")
+        .await;
+    assert!(matches!(result, Err(CoreError::AdminAuditFailed(_))));
+    assert_eq!(
+        fixture
+            .store
+            .user_by_id(&user.id)
+            .await
+            .unwrap()
+            .display_name,
+        "Original"
+    );
+}
+
+#[tokio::test]
+async fn audited_entra_identity_update_rolls_back_if_audit_fails() {
+    let fixture = migrated_store().await;
+    let (user, identity) = fixture
+        .store
+        .add_user_with_identity(AddUserWithIdentityInput {
+            email: "entra@example.com".to_owned(),
+            display_name: "User".to_owned(),
+            provider_id: "entra".to_owned(),
+            issuer: "https://example.com".to_owned(),
+            subject: "tenant:old".to_owned(),
+            subject_strategy: "entra_oid_tid".to_owned(),
+        })
+        .await
+        .unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    let result = fixture
+        .store
+        .audited("test")
+        .update_entra_identity(lore_auth_core::model::UpdateEntraIdentityInput {
+            user_id: user.id.clone(),
+            identity_id: identity.id,
+            provider_id: "entra".to_owned(),
+            issuer: "https://example.com".to_owned(),
+            expected_subject: "tenant:old".to_owned(),
+            subject: "tenant:new".to_owned(),
+        })
+        .await;
+    assert!(matches!(result, Err(CoreError::AdminAuditFailed(_))));
+    assert_eq!(
+        fixture
+            .store
+            .external_identities_for_user(&user.id)
+            .await
+            .unwrap()[0]
+            .subject,
+        "tenant:old"
+    );
 }
 
 #[tokio::test]
@@ -302,7 +1117,10 @@ async fn sqlite_resource_delete_hard_deletes_related_records_and_reuses_name() {
             |row| row.get(0),
         )
         .expect("count device authorizations");
-    assert_eq!(device_authorizations, 0, "device authorizations should be deleted");
+    assert_eq!(
+        device_authorizations, 0,
+        "device authorizations should be deleted"
+    );
 
     let new_repository_id = "new-repository-id";
     let new_resource_id =
@@ -1125,6 +1943,72 @@ async fn resolve_login_binds_verified_invitation_then_resolves_existing_identity
         existing_binding.external_identity_id,
         binding.external_identity_id
     );
+}
+
+#[tokio::test]
+async fn add_user_with_identity_binds_subject_atomically() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let audited = store.audited("admin@example.com".to_owned());
+    let input = AddUserWithIdentityInput {
+        email: "Alice@Example.com".to_owned(),
+        display_name: "Alice".to_owned(),
+        provider_id: "entra".to_owned(),
+        issuer: "https://login.microsoftonline.com/tenant-1/v2.0".to_owned(),
+        subject: "tenant-1:object-1".to_owned(),
+        subject_strategy: "entra_oid_tid".to_owned(),
+    };
+    let (user, identity) = audited
+        .add_user_with_identity(input.clone())
+        .await
+        .expect("add user with identity");
+    assert_eq!(user.status, "active");
+    assert_eq!(identity.user_id, user.id);
+    assert_eq!(identity.subject, "tenant-1:object-1");
+
+    let (principal, binding) = store
+        .resolve_login(LoginResolutionRequest {
+            identity: ExternalIdentity {
+                provider_id: input.provider_id.clone(),
+                issuer: input.issuer.clone(),
+                subject: input.subject.clone(),
+                ..ExternalIdentity::default()
+            },
+            policy: LoginTrustPolicy {
+                email_binding: "disabled".to_owned(),
+                allowed_email_domains: Vec::new(),
+            },
+        })
+        .await
+        .expect("resolve bound identity");
+    assert_eq!(principal.user_id, user.id);
+    assert_eq!(binding.status, "existing");
+
+    let actions: Vec<String> = store
+        .list_admin_audit()
+        .await
+        .expect("audit entries")
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect();
+    assert!(actions.contains(&"user.add".to_owned()));
+    assert!(actions.contains(&"user.bind_identity".to_owned()));
+
+    let duplicate = audited
+        .add_user_with_identity(AddUserWithIdentityInput {
+            email: "other@example.com".to_owned(),
+            ..input
+        })
+        .await;
+    assert!(matches!(duplicate, Err(CoreError::InvalidArgument(_))));
+    let users = store
+        .list_users(UserListFilter {
+            query: "other@example.com".to_owned(),
+            limit: 10,
+        })
+        .await
+        .expect("list users");
+    assert!(users.is_empty(), "failed bind must not leave a user behind");
 }
 
 #[tokio::test]

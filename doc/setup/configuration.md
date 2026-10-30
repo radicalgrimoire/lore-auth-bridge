@@ -106,9 +106,12 @@ See [Operations](operations.md#data-layout) for private key directory permission
 lore:
   default_remote_url: "lore://localhost:41337"
   auth_url: "https://localhost:8081"
+  repository_create_url: "http://127.0.0.1:41337"
 ```
 
 `default_remote_url` is the default Lore remote URL shown by token mint commands and UI.
+
+`repository_create_url` is the Lore gRPC endpoint used by the admin repository creation form. Leave it empty to disable creation. HTTP is allowed only with a loopback IP; other endpoints require HTTPS and a trusted certificate. See [Admin UI](admin-ui.md) for synchronization and partial-failure behavior.
 
 `auth_url` is the auth gRPC endpoint through which Lore reaches `UrcAuthApi` and `RebacApi`.
 

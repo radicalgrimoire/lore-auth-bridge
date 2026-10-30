@@ -2,9 +2,10 @@
 {% block title %}{{ self.t("admin.simulator.title") }}{% endblock %}
 {% block content %}
 <section>
+  <p><a href="/admin/server-settings">{{ self.t("admin.server_settings.title") }}</a></p>
   <h1>{{ self.t("admin.simulator.title") }}</h1>
   <p>{{ self.t("admin.simulator.note") }}</p>
-  <form method="post" action="/admin/simulator">
+  <form method="post" action="/admin/server-settings/simulator">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="text" name="user" value="{{ input_user }}" placeholder='{{ self.t("admin.simulator.user") }}' aria-label='{{ self.t("admin.simulator.user") }}'>
     <input type="text" name="resource" value="{{ input_resource }}" placeholder='{{ self.t("admin.simulator.resource") }}' aria-label='{{ self.t("admin.simulator.resource") }}'>

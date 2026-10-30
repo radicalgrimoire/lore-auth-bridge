@@ -130,19 +130,9 @@ The user argument accepts an email address or user ID.
 lore-authctl --config "$CONFIG" group member remove artists alice@example.com
 ```
 
-## group nest add
-
-```bash
-lore-authctl --config "$CONFIG" group nest add all-creators artists
-```
-
-`group nest` creates group-in-group membership.
-
-Users in the member group inherit grants assigned to the parent group transitively.
-
-Cycles and self-membership are rejected.
-
 ## group nest remove
+
+Neither the CLI nor the admin UI can create nested groups. The `phase7_remove_existing_group_nests_20261030` migration removes existing nested memberships once when the server or CLI opens the database, with admin audit records. Back up the database and review inherited access and service-account CIDRs before upgrading. This command can remove any remaining nested memberships.
 
 ```bash
 lore-authctl --config "$CONFIG" group nest remove all-creators artists

@@ -12,7 +12,25 @@ use super::{Store, normalize_resource_for_upsert};
 #[async_trait]
 impl ResourceStore for Store {
     async fn upsert(&self, resource: Resource) -> Result<(), CoreError> {
-        self.add_test_resource(normalize_resource_for_upsert(resource)?);
+        let mut resource = normalize_resource_for_upsert(resource)?;
+        let mut state = self.lock();
+        if let Some(existing) = state.resources.get(&resource.resource_id) {
+            if resource.id.is_empty() {
+                resource.id = existing.id.clone();
+            }
+            if existing.status == "disabled" {
+                resource.status = "disabled".to_owned();
+            }
+        }
+        if resource.id.is_empty() {
+            resource.id = uuid::Uuid::new_v4().to_string();
+        }
+        if resource.status.is_empty() {
+            resource.status = "active".to_owned();
+        }
+        state
+            .resources
+            .insert(resource.resource_id.clone(), resource);
         Ok(())
     }
 
@@ -31,7 +49,7 @@ impl ResourceQuery for Store {
         self.lock()
             .resources
             .values()
-            .find(|resource| resource.id == id)
+            .find(|resource| resource.id == id && resource.status == "active")
             .cloned()
             .ok_or(CoreError::NotFound)
     }
@@ -40,6 +58,7 @@ impl ResourceQuery for Store {
         self.lock()
             .resources
             .get(resource_id)
+            .filter(|resource| resource.status == "active")
             .cloned()
             .ok_or(CoreError::NotFound)
     }
@@ -48,7 +67,7 @@ impl ResourceQuery for Store {
         self.lock()
             .resources
             .values()
-            .find(|resource| resource.name == name)
+            .find(|resource| resource.name == name && resource.status == "active")
             .cloned()
             .ok_or(CoreError::NotFound)
     }
@@ -58,7 +77,7 @@ impl ResourceQuery for Store {
             .lock()
             .resources
             .values()
-            .filter(|resource| resource.status != "deleted")
+            .filter(|resource| resource.status == "active")
             .cloned()
             .collect::<Vec<_>>();
         out.sort_by(|left, right| left.resource_id.cmp(&right.resource_id));

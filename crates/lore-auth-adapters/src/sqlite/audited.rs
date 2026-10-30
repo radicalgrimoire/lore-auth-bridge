@@ -13,26 +13,34 @@ use lore_auth_core::{
     },
     ports::{
         AccountDirectory, AccountQuery, AdminAuditLog, AdminWritePortFactory, AdminWritePorts,
-        GrantAdmin, GrantQuery, GroupAdmin, GroupQuery, ResourceQuery, ResourceStore,
-        SigningKeyAdmin,
+        GrantAdmin, GrantQuery, GroupAdmin, GroupQuery, MaintenanceAdmin, RepositoryAdmin,
+        ResourceQuery, ResourceStore, ServiceAccountAdmin, SigningKeyAdmin,
     },
 };
 use tokio_rusqlite::{
     params,
-    rusqlite::{self, Row, TransactionBehavior},
+    rusqlite::{self, OptionalExtension, Row, TransactionBehavior},
 };
 
 use super::accounts::{
-    add_invitation_db, add_user_conn, disable_user_conn, enable_user_conn, resolve_user_id_conn,
-    user_by_id_conn,
+    add_invitation_db, add_user_conn, add_user_with_identity_conn, disable_user_conn,
+    enable_user_conn, resolve_user_id_conn, update_entra_identity_conn,
+    update_user_display_name_conn, user_by_id_conn,
 };
-use super::grants::{add_grant_conn, remove_grant_conn};
+use super::grants::{
+    add_grant_conn, add_grant_for_repository_conn, add_user_grants_conn, change_user_grants_conn,
+    grant_from_row, remove_grant_conn, remove_grant_for_repository_conn,
+    set_user_repository_roles_conn,
+};
 use super::groups::{
     group_group_edge_exists_tx, group_group_would_cycle_tx, group_id_by_name_conn,
     group_id_by_name_or_id_conn, group_id_by_name_or_id_tx, normalize_group_cidr,
 };
 use super::issued_tokens::add_signing_key_meta_conn;
-use super::resources::{delete_resource_conn, upsert_resource_conn};
+use super::resources::{
+    delete_resource_conn, resource_from_row, resource_select_base, upsert_resource_conn,
+};
+use super::service_accounts::create_service_account_conn;
 use super::{
     CoreResult, Store, collect_rows, core_from_driver, core_from_sql, new_id, none_if_empty,
     require_affected, resource_id_from_resource, unix_now,
@@ -61,10 +69,139 @@ impl AdminWritePortFactory for AuditedStoreFactory {
         let audited = Arc::new(self.store.audited(actor.to_owned()));
         AdminWritePorts {
             accounts: audited.clone(),
+            service_accounts: audited.clone(),
             resources: audited.clone(),
+            repository_admin: audited.clone(),
+            maintenance: audited.clone(),
             groups: audited.clone(),
             grants: audited,
         }
+    }
+}
+
+fn maintenance_settings_conn(
+    conn: &rusqlite::Connection,
+) -> CoreResult<model::MaintenanceSettings> {
+    conn.query_row(
+        "SELECT enabled, enabled_at, wait_minutes FROM maintenance_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(model::MaintenanceSettings {
+                enabled: row.get(0)?,
+                enabled_at: row.get(1)?,
+                wait_minutes: row.get(2)?,
+            })
+        },
+    )
+    .map_err(core_from_sql)
+}
+
+#[async_trait]
+impl MaintenanceAdmin for AuditedStore {
+    async fn get(&self) -> CoreResult<model::MaintenanceSettings> {
+        self.inner
+            .conn
+            .call(|conn| maintenance_settings_conn(conn))
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn set(
+        &self,
+        enabled: bool,
+        wait_minutes: u32,
+    ) -> CoreResult<model::MaintenanceSettings> {
+        if wait_minutes == 0 {
+            return Err(CoreError::InvalidArgument(
+                "wait time must be at least one minute".into(),
+            ));
+        }
+        let actor = self.actor.clone();
+        self.inner.conn.call(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(core_from_sql)?;
+            let current = maintenance_settings_conn(&tx)?;
+            let enabled_at = if enabled {
+                if current.enabled { current.enabled_at } else { unix_now() }
+            } else {
+                0
+            };
+            tx.execute(
+                "UPDATE maintenance_settings SET enabled = ?1, enabled_at = ?2, wait_minutes = ?3 WHERE id = 1",
+                params![enabled, enabled_at, wait_minutes],
+            ).map_err(core_from_sql)?;
+            insert_admin_audit_conn(
+                &tx,
+                admin_audit_entry(
+                    &actor,
+                    "maintenance.update",
+                    "server",
+                    "maintenance",
+                    format!("enabled={enabled} wait_minutes={wait_minutes}"),
+                ),
+            ).map_err(admin_audit_failed)?;
+            tx.commit().map_err(core_from_sql)?;
+            Ok(model::MaintenanceSettings { enabled, enabled_at, wait_minutes })
+        }).await.map_err(core_from_driver)
+    }
+}
+
+#[async_trait]
+impl ServiceAccountAdmin for AuditedStore {
+    async fn create_service_account_in_group(
+        &self,
+        input: model::CreateServiceAccountInput,
+        group_id: &str,
+    ) -> CoreResult<model::CreatedServiceAccount> {
+        let actor = self.actor.clone();
+        let group_id = group_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let group_id: String = tx
+                    .query_row(
+                        "SELECT id FROM groups WHERE id = ?1",
+                        params![group_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(core_from_sql)?
+                    .ok_or(CoreError::NotFound)?;
+                let created = create_service_account_conn(&tx, input)?;
+                tx.execute(
+                    "INSERT INTO group_members (group_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+                    params![group_id, created.account.user.id, unix_now()],
+                )
+                .map_err(core_from_sql)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "service_account.add",
+                        "service_account",
+                        created.account.user.id.clone(),
+                        format!("client_id={}", created.account.client_id),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "group.member.add",
+                        "group",
+                        group_id.clone(),
+                        format!("user={}", created.account.user.id),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(created)
+            })
+            .await
+            .map_err(core_from_driver)
     }
 }
 
@@ -142,6 +279,143 @@ impl AdminAuditLog for Store {
 
 #[async_trait]
 impl GrantAdmin for AuditedStore {
+    async fn set_user_repository_roles(
+        &self,
+        user_id: &str,
+        repositories: &[model::DirectRepositoryRoles],
+    ) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let user_id = user_id.to_owned();
+        let repositories = repositories.to_vec();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let (added, removed) =
+                    set_user_repository_roles_conn(&tx, &user_id, &repositories)?;
+                for (grant, repo) in added {
+                    insert_admin_audit_conn(
+                        &tx,
+                        admin_audit_entry(
+                            &actor,
+                            "grant.add",
+                            "grant",
+                            grant.id,
+                            grant_detail("user", &user_id, &repo, &grant.role),
+                        ),
+                    )
+                    .map_err(admin_audit_failed)?;
+                }
+                for (grant, repo) in removed {
+                    insert_admin_audit_conn(
+                        &tx,
+                        admin_audit_entry(
+                            &actor,
+                            "grant.remove",
+                            "grant",
+                            format!("user:{user_id}:{repo}:{}", grant.role),
+                            grant_detail("user", &user_id, &repo, &grant.role),
+                        ),
+                    )
+                    .map_err(admin_audit_failed)?;
+                }
+                tx.commit().map_err(core_from_sql)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn change_user_grants(
+        &self,
+        user_id: &str,
+        selected: &[String],
+        original: &[model::DirectRepositoryGrant],
+        role: &str,
+    ) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let user_id = user_id.to_owned();
+        let selected = selected.to_vec();
+        let original = original.to_vec();
+        let role = role.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let (added, removed) =
+                    change_user_grants_conn(&tx, &user_id, &selected, &original, &role)?;
+                for (grant, repo) in added {
+                    insert_admin_audit_conn(
+                        &tx,
+                        admin_audit_entry(
+                            &actor,
+                            "grant.add",
+                            "grant",
+                            grant.id,
+                            grant_detail("user", &user_id, &repo, &role),
+                        ),
+                    )
+                    .map_err(admin_audit_failed)?;
+                }
+                for (grant, repo) in removed {
+                    insert_admin_audit_conn(
+                        &tx,
+                        admin_audit_entry(
+                            &actor,
+                            "grant.remove",
+                            "grant",
+                            format!("user:{user_id}:{repo}:{}", grant.role),
+                            grant_detail("user", &user_id, &repo, &grant.role),
+                        ),
+                    )
+                    .map_err(admin_audit_failed)?;
+                }
+                tx.commit().map_err(core_from_sql)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn add_user_grants(
+        &self,
+        user_id: &str,
+        resource_ids: &[String],
+        role: &str,
+    ) -> CoreResult<Vec<Grant>> {
+        let actor = self.actor.clone();
+        let user_id = user_id.to_owned();
+        let resource_ids = resource_ids.to_vec();
+        let role = role.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let grants = add_user_grants_conn(&tx, &user_id, &resource_ids, &role)?;
+                for (grant, repo) in &grants {
+                    insert_admin_audit_conn(
+                        &tx,
+                        admin_audit_entry(
+                            &actor,
+                            "grant.add",
+                            "grant",
+                            grant.id.clone(),
+                            grant_detail("user", &user_id, repo, &role),
+                        ),
+                    )
+                    .map_err(admin_audit_failed)?;
+                }
+                tx.commit().map_err(core_from_sql)?;
+                Ok(grants.into_iter().map(|(grant, _)| grant).collect())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn add_grant(
         &self,
         subject_type: &str,
@@ -243,10 +517,83 @@ impl AccountQuery for AuditedStore {
     async fn list_users(&self, filter: UserListFilter) -> CoreResult<Vec<User>> {
         self.inner.list_users(filter).await
     }
+
+    async fn external_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> CoreResult<Vec<model::ExternalIdentity>> {
+        self.inner.external_identities_for_user(user_id).await
+    }
 }
 
 #[async_trait]
 impl AccountDirectory for AuditedStore {
+    async fn update_entra_identity(
+        &self,
+        input: model::UpdateEntraIdentityInput,
+    ) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                update_entra_identity_conn(&tx, &input)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.update_identity",
+                        "user",
+                        input.user_id.clone(),
+                        format!(
+                            "identity_id={} provider_id={} issuer={} old_subject={} new_subject={}",
+                            input.identity_id,
+                            input.provider_id,
+                            input.issuer,
+                            input.expected_subject,
+                            input.subject
+                        ),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn update_user_display_name(&self, user_id: &str, display_name: &str) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let user_id = user_id.to_owned();
+        let display_name = display_name.trim().to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                update_user_display_name_conn(&tx, &user_id, &display_name)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.update_display_name",
+                        "user",
+                        user_id,
+                        format!("display_name={display_name}"),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn resolve_login(
         &self,
         req: LoginResolutionRequest,
@@ -294,6 +641,50 @@ impl AccountDirectory for AuditedStore {
                 .map_err(admin_audit_failed)?;
                 tx.commit().map_err(core_from_sql)?;
                 Ok(user)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn add_user_with_identity(
+        &self,
+        input: model::AddUserWithIdentityInput,
+    ) -> CoreResult<(User, model::ExternalIdentity)> {
+        let actor = self.actor.clone();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let (user, identity) = add_user_with_identity_conn(&tx, input)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.add",
+                        "user",
+                        user.id.clone(),
+                        format!("email={}", user.email),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.bind_identity",
+                        "user",
+                        user.id.clone(),
+                        format!(
+                            "provider_id={} issuer={} subject={}",
+                            identity.provider_id, identity.issuer, identity.subject
+                        ),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok((user, identity))
             })
             .await
             .map_err(core_from_driver)
@@ -472,6 +863,276 @@ impl ResourceStore for AuditedStore {
                         "repository",
                         resource_id.clone(),
                         String::new(),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+}
+
+fn admin_repository_conn(conn: &rusqlite::Connection, resource_id: &str) -> CoreResult<Resource> {
+    let id = model::ResourceID::repository_id_from_resource_id(resource_id);
+    conn.query_row(
+        &format!(
+            "{} WHERE lore_repository_id = ?1 AND status IN ('active', 'disabled')",
+            resource_select_base()
+        ),
+        params![id],
+        resource_from_row,
+    )
+    .optional()
+    .map_err(core_from_sql)?
+    .ok_or(CoreError::NotFound)
+}
+
+#[async_trait]
+impl RepositoryAdmin for AuditedStore {
+    async fn list_all(&self) -> CoreResult<Vec<Resource>> {
+        self.inner
+            .conn
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "{} WHERE status IN ('active', 'disabled') ORDER BY name",
+                        resource_select_base()
+                    ))
+                    .map_err(core_from_sql)?;
+                let rows = stmt
+                    .query_map([], resource_from_row)
+                    .map_err(core_from_sql)?;
+                collect_rows(rows)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn get(&self, resource_id: &str) -> CoreResult<Resource> {
+        let resource_id = resource_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| admin_repository_conn(conn, &resource_id))
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn list_grants(&self, resource_id: &str) -> CoreResult<Vec<Grant>> {
+        let resource_id = resource_id.to_owned();
+        self.inner.conn.call(move |conn| {
+                let repo = admin_repository_conn(conn, &resource_id)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, subject_type, subject_id, repository_id, role FROM grants WHERE repository_id = ?1 ORDER BY subject_type, subject_id, role"
+                ).map_err(core_from_sql)?;
+                let rows = stmt.query_map(params![repo.id], grant_from_row).map_err(core_from_sql)?;
+                collect_rows(rows)
+            }).await.map_err(core_from_driver)
+    }
+
+    async fn add_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> CoreResult<()> {
+        self.mutate_repository_grant(resource_id, subject_type, subject, role, true)
+            .await
+    }
+
+    async fn remove_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> CoreResult<()> {
+        self.mutate_repository_grant(resource_id, subject_type, subject, role, false)
+            .await
+    }
+
+    async fn set_enabled(&self, resource_id: &str, enabled: bool) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let resource_id = resource_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                if !enabled && !maintenance_settings_conn(&tx)?.enabled {
+                    return Err(CoreError::InvalidArgument(
+                        "maintenance mode is required to disable a repository".into(),
+                    ));
+                }
+                let repo = admin_repository_conn(&tx, &resource_id)?;
+                let (expected, desired, action) = if enabled {
+                    ("disabled", "active", "repository.enable")
+                } else {
+                    ("active", "disabled", "repository.disable")
+                };
+                if repo.status != expected {
+                    return Err(CoreError::InvalidArgument(format!(
+                        "repository must be {expected}"
+                    )));
+                }
+                tx.execute(
+                    "UPDATE repositories SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![desired, unix_now(), repo.id],
+                )
+                .map_err(core_from_sql)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(&actor, action, "repository", repo.resource_id, repo.name),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn clear_grants(&self, resource_id: &str) -> CoreResult<u64> {
+        let actor = self.actor.clone();
+        let resource_id = resource_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                if !maintenance_settings_conn(&tx)?.enabled {
+                    return Err(CoreError::InvalidArgument(
+                        "maintenance mode is required to clear repository grants".into(),
+                    ));
+                }
+                let repo = admin_repository_conn(&tx, &resource_id)?;
+                if repo.status != "disabled" {
+                    return Err(CoreError::InvalidArgument(
+                        "repository must be disabled before clearing grants".into(),
+                    ));
+                }
+                let count = tx
+                    .execute(
+                        "DELETE FROM grants WHERE repository_id = ?1",
+                        params![repo.id],
+                    )
+                    .map_err(core_from_sql)?;
+                let count = u64::try_from(count).map_err(|_| {
+                    CoreError::InvalidArgument("grant count exceeds supported range".into())
+                })?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "repository.grants.clear",
+                        "repository",
+                        repo.resource_id,
+                        format!("name={} count={count}", repo.name),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(count)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn delete_disabled(&self, resource_id: &str) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let resource_id = resource_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let repo = admin_repository_conn(&tx, &resource_id)?;
+                if repo.status != "disabled" {
+                    return Err(CoreError::InvalidArgument(
+                        "repository must be disabled before deletion".into(),
+                    ));
+                }
+                delete_resource_conn(&tx, &repo.resource_id)?;
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "repository.delete",
+                        "repository",
+                        repo.resource_id,
+                        repo.name,
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+}
+
+impl AuditedStore {
+    async fn mutate_repository_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+        add: bool,
+    ) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let resource_id = resource_id.to_owned();
+        let subject_type = subject_type.to_owned();
+        let subject = subject.to_owned();
+        let role = role.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let repo = admin_repository_conn(&tx, &resource_id)?;
+                if repo.status != "active" {
+                    return Err(CoreError::InvalidArgument(
+                        "repository must be active to change grants".into(),
+                    ));
+                }
+                let (action, object_id) = if add {
+                    let grant = add_grant_for_repository_conn(
+                        &tx,
+                        &subject_type,
+                        &subject,
+                        &repo.id,
+                        &role,
+                    )?;
+                    ("grant.add", grant.id)
+                } else {
+                    remove_grant_for_repository_conn(
+                        &tx,
+                        &subject_type,
+                        &subject,
+                        &repo.id,
+                        &role,
+                    )?;
+                    (
+                        "grant.remove",
+                        format!("{subject_type}:{subject}:{}:{role}", repo.resource_id),
+                    )
+                };
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        action,
+                        "grant",
+                        object_id,
+                        grant_detail(&subject_type, &subject, &repo.name, &role),
                     ),
                 )
                 .map_err(admin_audit_failed)?;

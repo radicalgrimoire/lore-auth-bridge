@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="{{ lang }}">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,16 +12,13 @@
   <header class="container">
     <nav>
       <ul>
-        <li><strong>{{ self.t("admin.app.title") }}</strong></li>
+        <li><a href="/admin"{% if active == "dashboard" %} aria-current="page"{% endif %}><strong>{{ self.t("admin.app.title") }}</strong></a></li>
       </ul>
       <ul>
-        <li><a href="/admin"{% if active == "dashboard" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.dashboard") }}</a></li>
         <li><a href="/admin/repositories"{% if active == "repositories" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.repositories") }}</a></li>
         <li><a href="/admin/users"{% if active == "users" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.users") }}</a></li>
         <li><a href="/admin/groups"{% if active == "groups" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.groups") }}</a></li>
-        <li><a href="/admin/simulator"{% if active == "simulator" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.simulator") }}</a></li>
-        <li><a href="/admin?lang=en"{% if lang == "en" %} aria-current="page"{% endif %}>EN</a></li>
-        <li><a href="/admin?lang=ja"{% if lang == "ja" %} aria-current="page"{% endif %}>JA</a></li>
+        <li><a href="/admin/server-settings"{% if active == "server-settings" %} aria-current="page"{% else if active == "simulator" %} aria-current="true"{% endif %}>{{ self.t("admin.nav.server_settings") }}</a></li>
       </ul>
     </nav>
   </header>

@@ -106,9 +106,12 @@ private key directory の permission と backup は [Operations](operations.ja.m
 lore:
   default_remote_url: "lore://localhost:41337"
   auth_url: "https://localhost:8081"
+  repository_create_url: "http://127.0.0.1:41337"
 ```
 
 `default_remote_url` は token mint command や UI が表示する既定の Lore remote URL です。
+
+`repository_create_url` は管理画面の repository 作成に使用する Lore gRPC endpoint です。空の場合は作成できません。HTTP はループバック IP のみ使用でき、それ以外には信頼された証明書を持つ HTTPS が必要です。同期と部分的な失敗の扱いは [Admin UI](admin-ui.ja.md) を参照してください。
 
 `auth_url` は Lore が `UrcAuthApi` と `RebacApi` に到達する auth gRPC endpoint です。
 

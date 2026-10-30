@@ -309,7 +309,10 @@ impl TokenService {
             ..model::IssuedToken::default()
         })
         .await
-        .map_err(|_| CoreError::TokenIssueFailed)
+        .map_err(|err| match err {
+            CoreError::MaintenanceMode => err,
+            _ => CoreError::TokenIssueFailed,
+        })
     }
 
     fn authn_audience(&self) -> Vec<String> {

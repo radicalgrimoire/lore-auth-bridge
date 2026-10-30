@@ -165,6 +165,10 @@ fn token_result_html(token: &str, auth_url: &str, remote_url: &str, repo: &str) 
 
 fn write_token_issue_error(err: CoreError) -> Response {
     match err {
+        CoreError::MaintenanceMode => text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "token issuance is disabled during maintenance",
+        ),
         CoreError::InvalidArgument(_) => {
             text_response(StatusCode::BAD_REQUEST, "invalid token request")
         }

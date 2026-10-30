@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{Form, Query, State, connect_info::ConnectInfo},
+    extract::{Form, State, connect_info::ConnectInfo},
     http::HeaderMap,
     response::Response,
 };
@@ -12,15 +12,14 @@ use lore_auth_core::{CoreError, model};
 
 use crate::httpserver::AppState;
 
-use super::forms::{LangQuery, SimulatorForm};
+use super::forms::SimulatorForm;
 use super::guard::{create_admin_csrf, require_admin, require_admin_csrf};
-use super::i18n::{resolve_lang, translate};
+use super::i18n::translate;
 use super::templates::SimulatorTemplate;
 use super::{ADMIN_LIST_LIMIT, render_template};
 
 pub(super) async fn handle_simulator(
     State(state): State<AppState>,
-    Query(query): Query<LangQuery>,
     headers: HeaderMap,
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> Response {
@@ -28,14 +27,12 @@ pub(super) async fn handle_simulator(
         Ok(session) => session,
         Err(response) => return response,
     };
-    let lang = resolve_lang(&headers, query.lang.as_deref());
     let csrf_token = match create_admin_csrf(&state, &session).await {
         Ok(token) => token,
         Err(response) => return response,
     };
     render_template(SimulatorTemplate {
         active: "simulator",
-        lang: lang.as_str(),
         csrf_token: &csrf_token,
         input_user: "",
         input_resource: "",
@@ -58,15 +55,13 @@ pub(super) async fn handle_simulator_check(
     if let Err(response) = require_admin_csrf(&state, &session, &form.csrf_token).await {
         return response;
     }
-    let lang = resolve_lang(&headers, None);
     let csrf_token = match create_admin_csrf(&state, &session).await {
         Ok(token) => token,
         Err(response) => return response,
     };
-    let result = simulator_result(&state, &form, lang.as_str()).await;
+    let result = simulator_result(&state, &form).await;
     render_template(SimulatorTemplate {
         active: "simulator",
-        lang: lang.as_str(),
         csrf_token: &csrf_token,
         input_user: form.user.trim(),
         input_resource: form.resource.trim(),
@@ -95,15 +90,10 @@ pub(super) struct GrantEvidenceRow {
     pub(super) path: String,
 }
 
-async fn simulator_result(
-    state: &AppState,
-    form: &SimulatorForm,
-    lang: &str,
-) -> SimulatorResultView {
+async fn simulator_result(state: &AppState, form: &SimulatorForm) -> SimulatorResultView {
     let action = form.action.trim();
     if action.is_empty() {
         return simulator_error(
-            lang,
             CoreError::InvalidArgument("action must not be empty".to_owned()),
             "admin.simulator.error_invalid_input",
         );
@@ -111,17 +101,13 @@ async fn simulator_result(
     let user = match resolve_simulator_user(state, &form.user).await {
         Ok(user) => user,
         Err(CoreError::NotFound) => {
-            return simulator_error(
-                lang,
-                CoreError::NotFound,
-                "admin.simulator.error_user_not_found",
-            );
+            return simulator_error(CoreError::NotFound, "admin.simulator.error_user_not_found");
         }
-        Err(err) => return simulator_error(lang, err, "admin.simulator.error_user"),
+        Err(err) => return simulator_error(err, "admin.simulator.error_user"),
     };
     let resource_id = match resolve_simulator_resource_id(state, &form.resource).await {
         Ok(resource_id) => resource_id,
-        Err(err) => return simulator_error(lang, err, "admin.simulator.error_resource"),
+        Err(err) => return simulator_error(err, "admin.simulator.error_resource"),
     };
     let decision = state
         .services
@@ -147,12 +133,12 @@ async fn simulator_result(
                 .collect();
         }
         Err(CoreError::NotFound) => {
-            repository_note = translate(lang, "admin.simulator.repository_not_found");
+            repository_note = translate("admin.simulator.repository_not_found");
         }
         Err(err) => {
             repository_note = format!(
                 "{}: {}",
-                translate(lang, "admin.simulator.error_evidence"),
+                translate("admin.simulator.error_evidence"),
                 core_error_display(&err)
             );
         }
@@ -172,24 +158,18 @@ async fn simulator_result(
         evidence.push(GrantEvidenceRow {
             subject: format!("user:{}", user.email),
             role: "admin".to_owned(),
-            path: translate(lang, "admin.simulator.global_admin_evidence"),
+            path: translate("admin.simulator.global_admin_evidence"),
         });
     }
 
     let (status, detail) = match decision {
-        Ok(true) => (
-            translate(lang, "admin.simulator.status_allow"),
-            String::new(),
-        ),
-        Ok(false) => (
-            translate(lang, "admin.simulator.status_deny"),
-            String::new(),
-        ),
+        Ok(true) => (translate("admin.simulator.status_allow"), String::new()),
+        Ok(false) => (translate("admin.simulator.status_deny"), String::new()),
         Err(err) => (
-            translate(lang, "admin.simulator.status_error"),
+            translate("admin.simulator.status_error"),
             format!(
                 "{}: {}",
-                translate(lang, "admin.simulator.error_policy"),
+                translate("admin.simulator.error_policy"),
                 core_error_display(&err)
             ),
         ),
@@ -258,15 +238,11 @@ async fn resolve_simulator_resource_id(state: &AppState, value: &str) -> Result<
     }
 }
 
-fn simulator_error(lang: &str, err: CoreError, message_key: &str) -> SimulatorResultView {
+fn simulator_error(err: CoreError, message_key: &str) -> SimulatorResultView {
     SimulatorResultView {
         present: true,
-        status: translate(lang, "admin.simulator.status_error"),
-        detail: format!(
-            "{}: {}",
-            translate(lang, message_key),
-            core_error_display(&err)
-        ),
+        status: translate("admin.simulator.status_error"),
+        detail: format!("{}: {}", translate(message_key), core_error_display(&err)),
         ..SimulatorResultView::default()
     }
 }
@@ -281,6 +257,7 @@ fn core_error_display(err: &CoreError) -> String {
         CoreError::Unsupported => "Unsupported",
         CoreError::SigningKeyUnavailable => "SigningKeyUnavailable",
         CoreError::TokenIssueFailed => "TokenIssueFailed",
+        CoreError::MaintenanceMode => "MaintenanceMode",
         CoreError::DeviceInvalidCode => "DeviceInvalidCode",
         CoreError::DeviceExpiredCode => "DeviceExpiredCode",
         CoreError::DeviceAuthorizationNotPending => "DeviceAuthorizationNotPending",

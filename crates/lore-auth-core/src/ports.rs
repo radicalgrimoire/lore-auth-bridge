@@ -9,9 +9,56 @@ use crate::{CoreError, model};
 #[derive(Clone)]
 pub struct AdminWritePorts {
     pub accounts: Arc<dyn AccountDirectory>,
+    pub service_accounts: Arc<dyn ServiceAccountAdmin>,
     pub resources: Arc<dyn ResourceStore>,
+    pub repository_admin: Arc<dyn RepositoryAdmin>,
+    pub maintenance: Arc<dyn MaintenanceAdmin>,
     pub groups: Arc<dyn GroupAdmin>,
     pub grants: Arc<dyn GrantAdmin>,
+}
+
+#[async_trait]
+pub trait MaintenanceAdmin: Send + Sync {
+    async fn get(&self) -> Result<model::MaintenanceSettings, CoreError>;
+    async fn set(
+        &self,
+        enabled: bool,
+        wait_minutes: u32,
+    ) -> Result<model::MaintenanceSettings, CoreError>;
+}
+
+#[async_trait]
+pub trait RepositoryAdmin: Send + Sync {
+    async fn list_all(&self) -> Result<Vec<model::Resource>, CoreError>;
+    async fn get(&self, resource_id: &str) -> Result<model::Resource, CoreError>;
+    async fn list_grants(&self, resource_id: &str) -> Result<Vec<model::Grant>, CoreError>;
+    async fn add_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> Result<(), CoreError>;
+    async fn remove_grant(
+        &self,
+        resource_id: &str,
+        subject_type: &str,
+        subject: &str,
+        role: &str,
+    ) -> Result<(), CoreError>;
+    async fn set_enabled(&self, resource_id: &str, enabled: bool) -> Result<(), CoreError>;
+    async fn clear_grants(&self, resource_id: &str) -> Result<u64, CoreError>;
+    async fn delete_disabled(&self, resource_id: &str) -> Result<(), CoreError>;
+}
+
+#[async_trait]
+pub trait ServiceAccountAdmin: Send + Sync {
+    /// Atomically creates a service account, adds it to the group, and audits both operations.
+    async fn create_service_account_in_group(
+        &self,
+        input: model::CreateServiceAccountInput,
+        group_id: &str,
+    ) -> Result<model::CreatedServiceAccount, CoreError>;
 }
 
 /// Creates actor-scoped admin write ports.
@@ -26,6 +73,11 @@ pub trait AdminWritePortFactory: Send + Sync {
 #[async_trait]
 pub trait AccountQuery: Send + Sync {
     async fn user_by_id(&self, user_id: &str) -> Result<model::User, CoreError>;
+
+    async fn external_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<model::ExternalIdentity>, CoreError>;
 
     /// Lists non-deleted users matching the optional query, capped by `limit`.
     async fn list_users(
@@ -56,6 +108,26 @@ pub trait AccountDirectory: AccountQuery {
     ) -> Result<model::TokenPrincipal, CoreError>;
 
     async fn add_user(&self, input: model::AddUserInput) -> Result<model::User, CoreError>;
+
+    async fn update_user_display_name(
+        &self,
+        user_id: &str,
+        display_name: &str,
+    ) -> Result<(), CoreError>;
+
+    /// Updates a specific Entra binding only if its current subject and provider still match.
+    async fn update_entra_identity(
+        &self,
+        input: model::UpdateEntraIdentityInput,
+    ) -> Result<(), CoreError>;
+
+    /// Atomically creates an active user and binds the given external identity.
+    async fn add_user_with_identity(
+        &self,
+        _input: model::AddUserWithIdentityInput,
+    ) -> Result<(model::User, model::ExternalIdentity), CoreError> {
+        Err(CoreError::Unsupported)
+    }
 
     async fn add_invitation(
         &self,
@@ -333,6 +405,32 @@ pub trait GrantQuery: Send + Sync {
 
 #[async_trait]
 pub trait GrantAdmin: Send + Sync {
+    /// Atomically replaces direct user roles, rejecting stale snapshots.
+    async fn set_user_repository_roles(
+        &self,
+        user_id: &str,
+        repositories: &[model::DirectRepositoryRoles],
+    ) -> Result<(), CoreError>;
+
+    /// Atomically updates direct grants shown in a user access snapshot.
+    /// All original direct roles must still match, or the operation fails.
+    async fn change_user_grants(
+        &self,
+        user_id: &str,
+        selected: &[String],
+        original: &[model::DirectRepositoryGrant],
+        role: &str,
+    ) -> Result<(), CoreError>;
+
+    /// Atomically adds direct grants for a user and repository resource IDs.
+    /// Existing direct grants must not be overwritten.
+    async fn add_user_grants(
+        &self,
+        user_id: &str,
+        resource_ids: &[String],
+        role: &str,
+    ) -> Result<Vec<model::Grant>, CoreError>;
+
     /// Adds a grant for a repository name.
     ///
     /// `repo` is the repository `name`, not `lore_repository_id` or `resource_id`;

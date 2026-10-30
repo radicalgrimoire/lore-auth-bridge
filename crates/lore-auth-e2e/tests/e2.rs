@@ -121,7 +121,13 @@ async fn nested_group_grant_with_rebac_backend() -> Result<()> {
     h.run_authctl(["group", "add", "parent"])?;
     h.run_authctl(["group", "add", "child"])?;
     h.run_authctl(["group", "member", "add", "child", "e2e@example.com"])?;
-    h.run_authctl(["group", "nest", "add", "parent", "child"])?;
+    let inserted = h.db()?.execute(
+        "INSERT INTO group_groups (group_id, member_group_id, created_at)
+         SELECT parent.id, child.id, 0 FROM groups parent, groups child
+         WHERE parent.name = 'parent' AND child.name = 'child'",
+        [],
+    )?;
+    anyhow::ensure!(inserted == 1, "failed to seed legacy nested group");
     h.add_group_grant("parent", &repo, "writer")?;
 
     let authn = h.mint_authn_token("e2e@example.com")?;

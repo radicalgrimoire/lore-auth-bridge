@@ -157,19 +157,9 @@ user argument には email address または user ID を指定できます。
 lore-authctl --config "$CONFIG" group member remove artists alice@example.com
 ```
 
-## group nest add
-
-```bash
-lore-authctl --config "$CONFIG" group nest add all-creators artists
-```
-
-`group nest` は group-in-group membership を作ります。
-
-member group の user は、parent group に付けた grant を推移的に継承します。
-
-cycle と自己 membership は拒否されます。
-
 ## group nest remove
+
+CLI と管理画面のどちらからも nested group を新規作成することはできません。`phase7_remove_existing_group_nests_20261030` migration は server または CLI が DB を開く際に既存の group 間の所属を一度だけ解除し、admin audit に記録します。更新前に DB をバックアップし、継承権限と service account の許可 CIDR を確認してください。このコマンドで残存する nested group を解除できます。
 
 ```bash
 lore-authctl --config "$CONFIG" group nest remove all-creators artists

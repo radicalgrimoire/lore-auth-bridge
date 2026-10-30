@@ -1,0 +1,49 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ self.t("admin.server_settings.title") }}{% endblock %}
+{% block content %}
+<section>
+  <h1>{{ self.t("admin.server_settings.title") }}</h1>
+  <h2>{{ self.t("admin.maintenance.title") }}</h2>
+  <p>{{ self.t("admin.maintenance.help") }}</p>
+  {% if maintenance.enabled %}<p>{{ self.t("admin.maintenance.started_at") }}: {{ maintenance_started_at }} UTC</p>{% endif %}
+  <form method="post" action="/admin/server-settings/maintenance">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><input type="checkbox" name="enabled" value="on" {% if maintenance.enabled %}checked{% endif %}>{{ self.t("admin.maintenance.enabled") }}</label>
+    <label>{{ self.t("admin.maintenance.wait") }}
+      <input type="number" name="wait_minutes" min="1" max="4294967295" value="{{ maintenance.wait_minutes }}" required>
+    </label>
+    <button type="submit">{{ self.t("admin.maintenance.save") }}</button>
+  </form>
+</section>
+<section>
+  <h2>{{ self.t("admin.service_account.add") }}</h2>
+  <p>{{ self.t("admin.service_account.help") }}</p>
+  {% if groups.is_empty() %}
+  <p>{{ self.t("admin.service_account.no_groups") }}</p>
+  {% else %}
+  <form method="post" action="/admin/server-settings/service-accounts" hx-boost="false">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>{{ self.t("admin.service_account.client_id") }}
+      <input type="text" name="client_id" required maxlength="128" pattern="[A-Za-z0-9._-]+">
+    </label>
+    <label>{{ self.t("admin.users.display_name") }}
+      <input type="text" name="display_name">
+    </label>
+    <label>{{ self.t("admin.service_account.group") }}
+      <select name="group_id" required>
+        <option value="" selected disabled>{{ self.t("admin.service_account.select_group") }}</option>
+        {% for group in groups %}
+        <option value="{{ group.id }}">{{ group.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">{{ self.t("admin.service_account.add") }}</button>
+  </form>
+  {% endif %}
+</section>
+<section>
+  <h2>{{ self.t("admin.nav.simulator") }}</h2>
+  <p>{{ self.t("admin.simulator.note") }}</p>
+  <a href="/admin/server-settings/simulator">{{ self.t("admin.nav.simulator") }}</a>
+</section>
+{% endblock %}

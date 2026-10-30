@@ -191,6 +191,44 @@ pub struct Grant {
     pub role: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectRepositoryGrant {
+    pub resource_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectRepositoryRoles {
+    pub resource_id: String,
+    pub expected_roles: Vec<String>,
+    pub desired_roles: Vec<String>,
+}
+
+pub fn validate_direct_repository_roles(
+    repositories: &[DirectRepositoryRoles],
+) -> Result<(), crate::CoreError> {
+    let mut ids = std::collections::HashSet::new();
+    for repository in repositories {
+        if !repository.resource_id.starts_with("urc-") || !ids.insert(&repository.resource_id) {
+            return Err(crate::CoreError::InvalidArgument(
+                "invalid or duplicate repository".to_owned(),
+            ));
+        }
+        for roles in [&repository.expected_roles, &repository.desired_roles] {
+            let mut seen = std::collections::HashSet::new();
+            if roles
+                .iter()
+                .any(|role| !is_known_role(role) || !seen.insert(role))
+            {
+                return Err(crate::CoreError::InvalidArgument(
+                    "invalid or duplicate role".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrantEvidence {
     pub subject_type: String,
@@ -330,6 +368,27 @@ pub struct LoginResolutionRequest {
 pub struct AddUserInput {
     pub email: String,
     pub display_name: String,
+}
+
+/// Creates an active user and binds a pre-verified external identity in one step.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AddUserWithIdentityInput {
+    pub email: String,
+    pub display_name: String,
+    pub provider_id: String,
+    pub issuer: String,
+    pub subject: String,
+    pub subject_strategy: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateEntraIdentityInput {
+    pub user_id: String,
+    pub identity_id: String,
+    pub provider_id: String,
+    pub issuer: String,
+    pub expected_subject: String,
+    pub subject: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -505,6 +564,23 @@ pub struct IssuedToken {
     pub audience: Vec<String>,
     pub issued_at: i64,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaintenanceSettings {
+    pub enabled: bool,
+    pub enabled_at: i64,
+    pub wait_minutes: u32,
+}
+
+impl Default for MaintenanceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enabled_at: 0,
+            wait_minutes: 15,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

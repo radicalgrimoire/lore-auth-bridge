@@ -1,10 +1,10 @@
 //! Schema migrations and schema-version validation for the SQLite store.
 //! This module owns migration SQL and migration version bookkeeping.
 
-use super::{Result, Store, unix_now};
+use super::{Result, Store, new_id, unix_now};
 use tokio_rusqlite::{
     params,
-    rusqlite::{self, OptionalExtension},
+    rusqlite::{self, OptionalExtension, TransactionBehavior},
 };
 
 const BASELINE_VERSION: &str = "phase2b_baseline_20260702";
@@ -12,6 +12,8 @@ const GROUP_GROUPS_VERSION: &str = "phase3_group_groups_20260702";
 const ADMIN_AUDIT_VERSION: &str = "phase4_admin_audit_20260702";
 const GROUP_NETWORK_CIDRS_VERSION: &str = "phase5_group_network_cidrs_20261020";
 const SERVICE_ACCOUNTS_VERSION: &str = "phase6_service_accounts_20261021";
+const REMOVE_EXISTING_GROUP_NESTS_VERSION: &str = "phase7_remove_existing_group_nests_20261030";
+const MAINTENANCE_VERSION: &str = "phase8_maintenance_20261030";
 
 const BASELINE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -278,6 +280,17 @@ CREATE TABLE IF NOT EXISTS service_accounts (
 );
 "#;
 
+const MAINTENANCE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS maintenance_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  enabled_at INTEGER NOT NULL,
+  wait_minutes INTEGER NOT NULL CHECK (wait_minutes > 0)
+);
+INSERT OR IGNORE INTO maintenance_settings (id, enabled, enabled_at, wait_minutes)
+VALUES (1, 0, 0, 15);
+"#;
+
 impl Store {
     pub async fn migrate(&self) -> Result<()> {
         self.conn
@@ -287,6 +300,7 @@ impl Store {
                 conn.execute_batch(ADMIN_AUDIT_SCHEMA)?;
                 conn.execute_batch(GROUP_NETWORK_CIDRS_SCHEMA)?;
                 conn.execute_batch(SERVICE_ACCOUNTS_SCHEMA)?;
+                conn.execute_batch(MAINTENANCE_SCHEMA)?;
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![BASELINE_VERSION, unix_now()],
@@ -307,6 +321,38 @@ impl Store {
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                     params![SERVICE_ACCOUNTS_VERSION, unix_now()],
                 )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![MAINTENANCE_VERSION, unix_now()],
+                )?;
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let applied = tx.query_row(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                    params![REMOVE_EXISTING_GROUP_NESTS_VERSION],
+                    |_| Ok(()),
+                ).optional()?.is_some();
+                if !applied {
+                    let edges = {
+                        let mut stmt = tx.prepare(
+                            "SELECT group_id, member_group_id FROM group_groups ORDER BY group_id, member_group_id"
+                        )?;
+                        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+                        rows.collect::<rusqlite::Result<Vec<_>>>()?
+                    };
+                    for (parent, member) in &edges {
+                        tx.execute(
+                            "INSERT INTO admin_audit (id, actor, action, object_type, object_id, detail, created_at)
+                             VALUES (?1, 'migration', 'group.nest.remove', 'group', ?2, ?3, ?4)",
+                            params![new_id(), parent, format!("member_group={member}"), unix_now()],
+                        )?;
+                    }
+                    tx.execute("DELETE FROM group_groups", [])?;
+                    tx.execute(
+                        "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                        params![REMOVE_EXISTING_GROUP_NESTS_VERSION, unix_now()],
+                    )?;
+                }
+                tx.commit()?;
                 Ok::<(), rusqlite::Error>(())
             })
             .await?;
@@ -322,6 +368,8 @@ impl Store {
                     ADMIN_AUDIT_VERSION,
                     GROUP_NETWORK_CIDRS_VERSION,
                     SERVICE_ACCOUNTS_VERSION,
+                    REMOVE_EXISTING_GROUP_NESTS_VERSION,
+                    MAINTENANCE_VERSION,
                 ] {
                     let version = conn
                         .query_row(

@@ -3,29 +3,84 @@
 {% block content %}
 <section>
   <h1>{{ self.t("admin.user_access.title") }}</h1>
-  <p>{{ user.email }} ({{ user.status }})</p>
+  <p>{% if user.email.is_empty() %}{{ user.display_name }}{% else %}{{ user.email }}{% endif %} ({{ user.status }})</p>
+  <form method="post" action="/admin/users/{{ user.id_path }}/display-name">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="display-name">{{ self.t("admin.users.display_name") }}</label>
+    <input id="display-name" type="text" name="display_name" value="{{ user.display_name }}" required>
+    <button type="submit">{{ self.t("admin.user_access.save_name") }}</button>
+  </form>
 </section>
 <section>
-  <p>{{ self.t("admin.list.limit_note") }} {{ limit }}</p>
-  {% if rows.is_empty() %}
-  <p>{{ self.t("admin.user_access.empty") }}</p>
+  <h2>{{ self.t("admin.user_access.entra_identities") }}</h2>
+  <p>{{ self.t("admin.user_access.identity_edit_help") }}</p>
+  {% if identities.is_empty() %}
+  <p>{{ self.t("admin.user_access.no_entra_identity") }}</p>
   {% else %}
+  {% for identity in identities %}
+  <dl>
+    <dt>{{ self.t("admin.users.provider_id") }}</dt><dd>{{ identity.provider_id }} ({{ identity.status }})</dd>
+    {% if !identity.tenant_id.is_empty() && !identity.object_id.is_empty() %}
+    <dt>{{ self.t("admin.user_access.tenant_id") }}</dt><dd>{{ identity.tenant_id }}</dd>
+    <dt>{{ self.t("admin.users.object_id") }}</dt><dd>{{ identity.object_id }}</dd>
+    {% else %}
+    <dt>{{ self.t("admin.user_access.invalid_subject") }}</dt><dd>{{ identity.subject }}</dd>
+    {% endif %}
+  </dl>
+  <form method="post" action="/admin/users/{{ user.id_path }}/identities/{{ identity.id_path }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="expected_subject" value="{{ identity.subject }}">
+    <label>{{ self.t("admin.user_access.tenant_id") }}
+      <input type="text" name="tenant_id" value="{{ identity.tenant_id }}" required spellcheck="false">
+    </label>
+    <label>{{ self.t("admin.users.object_id") }}
+      <input type="text" name="object_id" value="{{ identity.object_id }}" required spellcheck="false">
+    </label>
+    <button type="submit">{{ self.t("admin.user_access.save_identity") }}</button>
+  </form>
+  {% endfor %}
+  {% endif %}
+</section>
+<section>
+  <h2>{{ self.t("admin.user_access.add_repositories") }}</h2>
+  <p>{{ self.t("admin.user_access.add_repositories_help") }}</p>
+  {% if repositories.is_empty() %}
+  <p>{{ self.t("admin.repositories.empty") }}</p>
+  {% else %}
+  <form method="post" action="/admin/users/{{ user.id_path }}/access">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <table>
     <thead>
       <tr>
+        <th scope="col">{{ self.t("admin.repositories.name") }}</th>
         <th scope="col">{{ self.t("admin.user_access.resource_id") }}</th>
         <th scope="col">{{ self.t("admin.user_access.permissions") }}</th>
       </tr>
     </thead>
     <tbody>
-      {% for row in rows %}
+      {% for repository in repositories %}
       <tr>
-        <td>{{ row.resource_id }}</td>
-        <td>{{ row.permissions }}</td>
+        <td>{{ repository.name }}</td>
+        <td>{{ repository.resource_id }}</td>
+        <td>
+          <input type="hidden" name="snapshot" value="{{ repository.resource_id }}:{{ repository.roles.join(",") }}">
+          <select name="role:{{ repository.resource_id }}" aria-label="{{ self.t("admin.user_access.direct_roles") }}: {{ repository.name }}">
+            {% if repository.roles.len() > 1 %}
+            <option value="keep" selected>{{ self.t("admin.user_access.keep_roles") }}: {{ repository.roles.join(", ") }}</option>
+            {% endif %}
+            <option value="none"{% if repository.roles.is_empty() %} selected{% endif %}>None</option>
+            <option value="reader"{% if repository.roles.len() == 1 && repository.roles[0] == "reader" %} selected{% endif %}>Reader</option>
+            <option value="writer"{% if repository.roles.len() == 1 && repository.roles[0] == "writer" %} selected{% endif %}>Writer</option>
+            <option value="admin"{% if repository.roles.len() == 1 && repository.roles[0] == "admin" %} selected{% endif %}>Admin</option>
+          </select>
+          <small>{{ self.t("admin.user_access.effective") }}: {{ repository.effective }}</small>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+    <button type="submit">{{ self.t("admin.user_access.save_repositories") }}</button>
+  </form>
   {% endif %}
 </section>
 {% endblock %}

@@ -102,6 +102,20 @@ fn list_admin_audit(config: &Path) -> Vec<lore_auth_core::model::AdminAuditEntry
         })
 }
 
+fn insert_existing_group_nest(config: &Path, parent: &str, child: &str) {
+    let cfg = config::load(config).expect("config loads");
+    let conn = rusqlite::Connection::open(&cfg.database.path).expect("open sqlite");
+    let changed = conn
+        .execute(
+            "INSERT INTO group_groups (group_id, member_group_id, created_at)
+         SELECT parent.id, child.id, 0 FROM groups parent, groups child
+         WHERE parent.name = ?1 AND child.name = ?2",
+            rusqlite::params![parent, child],
+        )
+        .expect("insert existing nest");
+    assert_eq!(changed, 1);
+}
+
 fn action_counts(entries: &[lore_auth_core::model::AdminAuditEntry]) -> BTreeMap<&str, usize> {
     let mut counts = BTreeMap::new();
     for entry in entries {
@@ -359,7 +373,7 @@ fn authctl_group_commands_record_admin_audit() {
         &["group", "member", "remove", "artists", "alice@example.com"],
     ));
     assert_success(run(&config, &["group", "add", "leads"]));
-    assert_success(run(&config, &["group", "nest", "add", "leads", "artists"]));
+    insert_existing_group_nest(&config, "leads", "artists");
     assert_success(run(
         &config,
         &["group", "nest", "remove", "leads", "artists"],
@@ -384,7 +398,6 @@ fn authctl_group_commands_record_admin_audit() {
             ("group.member.remove", 1),
             ("group.network_cidr.add", 1),
             ("group.network_cidr.remove", 1),
-            ("group.nest.add", 1),
             ("group.nest.remove", 1),
             ("user.add", 1),
         ])
@@ -606,7 +619,7 @@ fn check_uses_rebac_authorization() {
 }
 
 #[test]
-fn group_nest_add_and_remove_commands_update_group_edges() {
+fn group_nest_add_is_rejected_and_remove_remains_available() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = write_config_with_authz(dir.path(), "rebac");
 
@@ -614,35 +627,26 @@ fn group_nest_add_and_remove_commands_update_group_edges() {
     assert_success(run(&config, &["group", "add", "artists"]));
     assert_success(run(&config, &["group", "add", "riggers"]));
 
-    let out = assert_success(run(
+    let (_stdout, stderr) = assert_failure(run(
         &config,
         &["group", "nest", "add", "artists", "riggers"],
     ));
-    assert_eq!(out.trim(), "ok");
+    assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+    let cfg = config::load(&config).unwrap();
+    let conn = rusqlite::Connection::open(&cfg.database.path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM group_groups", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 
+    insert_existing_group_nest(&config, "artists", "riggers");
     let out = assert_success(run(
         &config,
         &["group", "nest", "remove", "artists", "riggers"],
     ));
     assert_eq!(out.trim(), "ok");
-}
-
-#[test]
-fn group_nest_cycle_rejection_is_reported_by_cli() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let config = write_config_with_authz(dir.path(), "rebac");
-
-    assert_success(run(&config, &["init-db"]));
-    assert_success(run(&config, &["group", "add", "artists"]));
-    assert_success(run(&config, &["group", "add", "riggers"]));
-    assert_success(run(
-        &config,
-        &["group", "nest", "add", "artists", "riggers"],
-    ));
-
-    let (_stdout, stderr) = assert_failure(run(
-        &config,
-        &["group", "nest", "add", "riggers", "artists"],
-    ));
-    assert!(stderr.contains("cycle"), "{stderr}");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM group_groups", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }

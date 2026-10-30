@@ -1,0 +1,28 @@
+// SPDX-FileCopyrightText: 2026 Epic Games, Inc.
+// SPDX-License-Identifier: MIT
+// Wire-compatible subset of Lore's repository v1 protocol.
+syntax = "proto3";
+
+package lore.repository.v1;
+
+service RepositoryService {
+  rpc RepositoryCreate(RepositoryCreateRequest) returns (RepositoryCreateResponse);
+}
+
+message RepositoryCreateRequest {
+  bytes id = 1;
+  string name = 2;
+  string description = 3;
+  bytes default_branch_id = 4;
+  string default_branch_name = 5;
+  optional string creator = 6;
+}
+
+message RepositoryCreateResponse {
+  Repository repository = 1;
+}
+
+message Repository {
+  bytes id = 1;
+  string name = 2;
+}

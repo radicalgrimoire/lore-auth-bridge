@@ -5,20 +5,141 @@ use async_trait::async_trait;
 use lore_auth_core::{
     CoreError,
     model::{
-        AddInvitationInput, AddUserInput, IdentityInvitation, LoginBindingResult,
-        LoginResolutionRequest, TokenPrincipal, User, UserListFilter,
+        AddInvitationInput, AddUserInput, AddUserWithIdentityInput, ExternalIdentity,
+        IdentityInvitation, LoginBindingResult, LoginResolutionRequest, TokenPrincipal,
+        UpdateEntraIdentityInput, User, UserListFilter,
     },
     ports::{AccountDirectory, AccountQuery},
 };
 
 use super::{
-    Store, active_user, allows_verified_email_invitation_binding, effective_limit,
+    State, Store, active_user, allows_verified_email_invitation_binding, effective_limit,
     email_domain_allowed, external_identity_key, now_unix, principal_from_user, resolve_user_id,
     validated_account_email,
 };
 
+pub(super) fn update_user_display_name_locked(
+    state: &mut State,
+    user_id: &str,
+    display_name: &str,
+) -> Result<(), CoreError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(CoreError::InvalidArgument(
+            "display name is required".to_owned(),
+        ));
+    }
+    let user = state
+        .users
+        .get_mut(user_id)
+        .filter(|user| user.status != "deleted")
+        .ok_or(CoreError::NotFound)?;
+    user.display_name = display_name.to_owned();
+    Ok(())
+}
+
+pub(super) fn update_entra_identity_locked(
+    state: &mut State,
+    input: &UpdateEntraIdentityInput,
+) -> Result<(), CoreError> {
+    if input.subject.trim().is_empty() {
+        return Err(CoreError::InvalidArgument("subject is required".to_owned()));
+    }
+    state
+        .users
+        .get(&input.user_id)
+        .filter(|user| user.status != "deleted")
+        .ok_or(CoreError::NotFound)?;
+    let (old_key, mut identity) = state
+        .identities
+        .iter()
+        .find(|(_, identity)| identity.id == input.identity_id && identity.user_id == input.user_id)
+        .map(|(key, identity)| (key.clone(), identity.clone()))
+        .ok_or(CoreError::NotFound)?;
+    if identity.subject_strategy != "entra_oid_tid"
+        || identity.provider_id != input.provider_id
+        || identity.issuer != input.issuer
+        || identity.subject != input.expected_subject
+    {
+        return Err(CoreError::InvalidArgument(
+            "identity changed or provider does not match; reload the page".to_owned(),
+        ));
+    }
+    identity.subject = input.subject.clone();
+    let new_key = external_identity_key(&identity);
+    if new_key != old_key && state.identities.contains_key(&new_key) {
+        return Err(CoreError::InvalidArgument(
+            "external identity is already bound to another user or is inactive".to_owned(),
+        ));
+    }
+    state.identities.remove(&old_key);
+    state.identities.insert(new_key, identity);
+    Ok(())
+}
+
+pub(super) fn add_user_with_identity_locked(
+    state: &mut State,
+    input: AddUserWithIdentityInput,
+) -> Result<(User, ExternalIdentity), CoreError> {
+    let email = validated_account_email(&input.email)?;
+    let identity = ExternalIdentity {
+        provider_id: input.provider_id.trim().to_owned(),
+        issuer: input.issuer.trim().to_owned(),
+        subject: input.subject.trim().to_owned(),
+        subject_strategy: input.subject_strategy.trim().to_owned(),
+        ..ExternalIdentity::default()
+    };
+    if identity.provider_id.is_empty()
+        || identity.issuer.is_empty()
+        || identity.subject.is_empty()
+        || identity.subject_strategy.is_empty()
+    {
+        return Err(CoreError::InvalidArgument(
+            "provider_id, issuer, subject, and subject_strategy are required".to_owned(),
+        ));
+    }
+    let key = external_identity_key(&identity);
+    if state.identities.contains_key(&key) {
+        return Err(CoreError::InvalidArgument(
+            "external identity is already bound to another user or is inactive".to_owned(),
+        ));
+    }
+    let user = User {
+        id: uuid::Uuid::new_v4().to_string(),
+        email: email.clone(),
+        display_name: input.display_name,
+        status: "active".to_owned(),
+        last_login_at: 0,
+    };
+    let identity = ExternalIdentity {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: user.id.clone(),
+        email,
+        status: "active".to_owned(),
+        ..identity
+    };
+    state.users.insert(user.id.clone(), user.clone());
+    state.identities.insert(key, identity.clone());
+    Ok((user, identity))
+}
+
 #[async_trait]
 impl AccountDirectory for Store {
+    async fn update_entra_identity(
+        &self,
+        input: UpdateEntraIdentityInput,
+    ) -> Result<(), CoreError> {
+        update_entra_identity_locked(&mut self.lock(), &input)
+    }
+
+    async fn update_user_display_name(
+        &self,
+        user_id: &str,
+        display_name: &str,
+    ) -> Result<(), CoreError> {
+        update_user_display_name_locked(&mut self.lock(), user_id, display_name)
+    }
+
     async fn resolve_login(
         &self,
         req: LoginResolutionRequest,
@@ -210,6 +331,13 @@ impl AccountDirectory for Store {
         Ok(user)
     }
 
+    async fn add_user_with_identity(
+        &self,
+        input: AddUserWithIdentityInput,
+    ) -> Result<(User, ExternalIdentity), CoreError> {
+        add_user_with_identity_locked(&mut self.lock(), input)
+    }
+
     async fn add_invitation(
         &self,
         input: AddInvitationInput,
@@ -274,6 +402,23 @@ impl AccountDirectory for Store {
 
 #[async_trait]
 impl AccountQuery for Store {
+    async fn external_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ExternalIdentity>, CoreError> {
+        let state = self.lock();
+        let mut identities: Vec<_> = state
+            .identities
+            .values()
+            .filter(|identity| identity.user_id == user_id)
+            .cloned()
+            .collect();
+        identities.sort_by(|a, b| {
+            (&a.provider_id, &a.issuer, &a.subject).cmp(&(&b.provider_id, &b.issuer, &b.subject))
+        });
+        Ok(identities)
+    }
+
     async fn user_by_id(&self, user_id: &str) -> Result<User, CoreError> {
         self.lock()
             .users

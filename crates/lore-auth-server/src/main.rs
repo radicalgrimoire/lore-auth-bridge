@@ -20,6 +20,7 @@ use lore_auth_core::{
 };
 use lore_auth_inbound::{
     admin::AdminConfig as InboundAdminConfig,
+    admin::AdminEntraProvider,
     grpcauth::{Services as GrpcAuthServices, UrcAuthServer},
     grpcrebac::{
         RebacPeerAllowlistLayer, RebacServer, default_allowed_peer_cidrs, parse_allowed_peer_cidrs,
@@ -244,11 +245,17 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
         permissions: permissions.clone(),
         accounts: account_query,
         admin_writes,
+        admin_audit: store.clone(),
         groups: groups.clone(),
         grants,
         state: state_store,
         jwks: signer,
         device: Some(device),
+        repository_creator: Arc::new(
+            lore_auth_inbound::repository_client::LoreRepositoryCreator::new(
+                cfg.lore.repository_create_url.clone(),
+            ),
+        ),
     };
 
     Ok(ServiceGraph {
@@ -276,6 +283,22 @@ fn admin_config(cfg: &config::Config) -> Result<InboundAdminConfig> {
         admin_emails: cfg.admin.admin_emails.clone(),
         global_repository_admin: cfg.admin.global_repository_admin,
         allowed_peer_cidrs,
+        entra_providers: cfg
+            .identity_providers
+            .providers
+            .iter()
+            .filter(|(_, provider)| provider.subject.strategy == "entra_oid_tid")
+            .map(|(id, provider)| AdminEntraProvider {
+                id: id.clone(),
+                display_name: if provider.display_name.trim().is_empty() {
+                    id.clone()
+                } else {
+                    provider.display_name.clone()
+                },
+                issuer: provider.issuer.clone(),
+                tenant_id: provider.subject.required_tid.trim().to_owned(),
+            })
+            .collect(),
     })
 }
 

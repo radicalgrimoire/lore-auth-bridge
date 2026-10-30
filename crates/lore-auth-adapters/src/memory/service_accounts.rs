@@ -5,7 +5,7 @@ use lore_auth_core::{
     ports::ServiceAccountDirectory,
 };
 
-use super::{ServiceAccountCredential, Store, hash_secret, random_secret};
+use super::{ServiceAccountCredential, State, Store, hash_secret, random_secret};
 
 #[async_trait]
 impl ServiceAccountDirectory for Store {
@@ -13,36 +13,7 @@ impl ServiceAccountDirectory for Store {
         &self,
         input: CreateServiceAccountInput,
     ) -> Result<CreatedServiceAccount, CoreError> {
-        let client_id = validated_client_id(&input.client_id)?;
-        let client_secret = random_secret();
-        let user = User {
-            id: uuid::Uuid::new_v4().to_string(),
-            display_name: input.display_name.trim().to_owned(),
-            status: "active".to_owned(),
-            ..User::default()
-        };
-        let mut state = self.lock();
-        if state
-            .service_accounts
-            .values()
-            .any(|account| account.client_id == client_id)
-        {
-            return Err(CoreError::InvalidArgument(
-                "service account client_id already exists".to_owned(),
-            ));
-        }
-        state.users.insert(user.id.clone(), user.clone());
-        state.service_accounts.insert(
-            user.id.clone(),
-            ServiceAccountCredential {
-                client_id: client_id.clone(),
-                secret_hash: hash_secret(&client_secret),
-            },
-        );
-        Ok(CreatedServiceAccount {
-            account: ServiceAccount { user, client_id },
-            client_secret,
-        })
+        create_service_account_locked(&mut self.lock(), input)
     }
 
     async fn authenticate_service_account(
@@ -101,6 +72,41 @@ impl ServiceAccountDirectory for Store {
             client_secret,
         })
     }
+}
+
+pub(super) fn create_service_account_locked(
+    state: &mut State,
+    input: CreateServiceAccountInput,
+) -> Result<CreatedServiceAccount, CoreError> {
+    let client_id = validated_client_id(&input.client_id)?;
+    if state
+        .service_accounts
+        .values()
+        .any(|account| account.client_id == client_id)
+    {
+        return Err(CoreError::InvalidArgument(
+            "service account client_id already exists".to_owned(),
+        ));
+    }
+    let client_secret = random_secret();
+    let user = User {
+        id: uuid::Uuid::new_v4().to_string(),
+        display_name: input.display_name.trim().to_owned(),
+        status: "active".to_owned(),
+        ..User::default()
+    };
+    state.users.insert(user.id.clone(), user.clone());
+    state.service_accounts.insert(
+        user.id.clone(),
+        ServiceAccountCredential {
+            client_id: client_id.clone(),
+            secret_hash: hash_secret(&client_secret),
+        },
+    );
+    Ok(CreatedServiceAccount {
+        account: ServiceAccount { user, client_id },
+        client_secret,
+    })
 }
 
 fn validated_client_id(value: &str) -> Result<String, CoreError> {

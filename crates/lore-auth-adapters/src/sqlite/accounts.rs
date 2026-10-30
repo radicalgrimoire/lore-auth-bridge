@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use lore_auth_core::{
     CoreError,
     model::{
-        AddInvitationInput, AddUserInput, ExternalIdentity, IdentityInvitation, LoginBindingResult,
-        LoginResolutionRequest, TokenPrincipal, User, UserListFilter,
+        AddInvitationInput, AddUserInput, AddUserWithIdentityInput, ExternalIdentity,
+        IdentityInvitation, LoginBindingResult, LoginResolutionRequest, TokenPrincipal,
+        UpdateEntraIdentityInput, User, UserListFilter,
     },
     ports::{AccountDirectory, AccountQuery},
 };
@@ -151,10 +152,43 @@ impl AccountQuery for Store {
             .await
             .map_err(core_from_driver)
     }
+
+    async fn external_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> CoreResult<Vec<ExternalIdentity>> {
+        let user_id = user_id.to_owned();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, user_id, provider_id, issuer, subject, subject_strategy,
+                            email, email_verified, display_name, picture_url, hosted_domain, status
+                     FROM external_identities WHERE user_id = ?1 ORDER BY provider_id, issuer, subject",
+                ).map_err(core_from_sql)?;
+                let rows = stmt.query_map(params![user_id], external_identity_from_row).map_err(core_from_sql)?;
+                collect_rows(rows)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
 }
 
 #[async_trait]
 impl AccountDirectory for Store {
+    async fn update_entra_identity(&self, input: UpdateEntraIdentityInput) -> CoreResult<()> {
+        self.conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                update_entra_identity_conn(&tx, &input)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn resolve_login(
         &self,
         req: LoginResolutionRequest,
@@ -247,6 +281,32 @@ impl AccountDirectory for Store {
             .map_err(core_from_driver)
     }
 
+    async fn update_user_display_name(&self, user_id: &str, display_name: &str) -> CoreResult<()> {
+        let user_id = user_id.to_owned();
+        let display_name = display_name.to_owned();
+        self.conn
+            .call(move |conn| update_user_display_name_conn(conn, &user_id, &display_name))
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn add_user_with_identity(
+        &self,
+        input: AddUserWithIdentityInput,
+    ) -> CoreResult<(User, ExternalIdentity)> {
+        self.conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let out = add_user_with_identity_conn(&tx, input)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(out)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn add_invitation(
         &self,
         input: AddInvitationInput,
@@ -293,6 +353,96 @@ pub(super) fn add_user_conn(conn: &rusqlite::Connection, input: AddUserInput) ->
     )
     .map_err(core_from_sql)?;
     Ok(user)
+}
+
+pub(super) fn update_entra_identity_conn(
+    conn: &rusqlite::Connection,
+    input: &UpdateEntraIdentityInput,
+) -> CoreResult<()> {
+    if input.subject.trim().is_empty() {
+        return Err(CoreError::InvalidArgument("subject is required".to_owned()));
+    }
+    let identity = conn
+        .query_row(
+            "SELECT id, user_id, provider_id, issuer, subject, subject_strategy, email,
+                email_verified, display_name, picture_url, hosted_domain, status
+         FROM external_identities WHERE id = ?1 AND user_id = ?2",
+            params![input.identity_id, input.user_id],
+            external_identity_from_row,
+        )
+        .optional()
+        .map_err(core_from_sql)?
+        .ok_or(CoreError::NotFound)?;
+    user_by_id_conn(conn, &input.user_id)?;
+    if identity.subject_strategy != "entra_oid_tid"
+        || identity.provider_id != input.provider_id
+        || identity.issuer != input.issuer
+        || identity.subject != input.expected_subject
+    {
+        return Err(CoreError::InvalidArgument(
+            "identity changed or provider does not match; reload the page".to_owned(),
+        ));
+    }
+    let duplicate = conn.query_row(
+        "SELECT 1 FROM external_identities WHERE provider_id = ?1 AND issuer = ?2 AND subject = ?3 AND id != ?4",
+        params![input.provider_id, input.issuer, input.subject, input.identity_id], |_| Ok(()),
+    ).optional().map_err(core_from_sql)?;
+    if duplicate.is_some() {
+        return Err(CoreError::InvalidArgument(
+            "external identity is already bound to another user or is inactive".to_owned(),
+        ));
+    }
+    conn.execute(
+        "UPDATE external_identities SET subject = ?1 WHERE id = ?2",
+        params![input.subject, input.identity_id],
+    )
+    .map_err(core_from_sql)?;
+    Ok(())
+}
+
+pub(super) fn update_user_display_name_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    display_name: &str,
+) -> CoreResult<()> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(CoreError::InvalidArgument(
+            "display name is required".to_owned(),
+        ));
+    }
+    let affected = conn.execute(
+        "UPDATE users SET display_name = ?1, updated_at = ?2 WHERE id = ?3 AND status != 'deleted'",
+        params![display_name, unix_now(), user_id],
+    ).map_err(core_from_sql)?;
+    require_affected(affected, CoreError::NotFound)
+}
+
+/// Must run inside a transaction so a failed bind does not leave an orphan user.
+pub(super) fn add_user_with_identity_conn(
+    conn: &rusqlite::Connection,
+    input: AddUserWithIdentityInput,
+) -> CoreResult<(User, ExternalIdentity)> {
+    let user = add_user_conn(
+        conn,
+        AddUserInput {
+            email: input.email,
+            display_name: input.display_name,
+        },
+    )?;
+    let identity = Store::bind_external_identity_conn(
+        conn,
+        ExternalIdentity {
+            provider_id: input.provider_id,
+            issuer: input.issuer,
+            subject: input.subject,
+            subject_strategy: input.subject_strategy,
+            email: user.id.clone(),
+            status: "active".to_owned(),
+            ..ExternalIdentity::default()
+        },
+    )?;
+    Ok((user, identity))
 }
 
 fn add_invitation_conn(

@@ -150,7 +150,7 @@ pub(super) fn upsert_resource_conn(
             let changed = conn
                 .execute(
                     "UPDATE repositories
-                     SET name = ?1, remote_url = ?2, status = 'active', updated_at = ?3
+                     SET name = ?1, remote_url = ?2, updated_at = ?3
                      WHERE id = ?4 AND created_by_source = 'manual'",
                     params![name, resource.remote_url, now, existing.resource.id],
                 )
@@ -178,7 +178,7 @@ pub(super) fn upsert_resource_conn(
     let changed = conn
         .execute(
             "UPDATE repositories
-             SET status = 'active', updated_at = ?1
+             SET updated_at = ?1
              WHERE lore_repository_id = ?2",
             params![now, lore_repository_id],
         )
@@ -230,7 +230,7 @@ pub(super) fn delete_resource_conn(
     require_affected(changed, CoreError::NotFound)
 }
 
-fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
+pub(super) fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
     let lore_repository_id = row.get::<_, String>(3)?;
     Ok(Resource {
         id: row.get(0)?,
@@ -254,7 +254,7 @@ fn resource_with_source_from_row(row: &Row<'_>) -> rusqlite::Result<ResourceWith
     })
 }
 
-fn resource_select_base() -> &'static str {
+pub(super) fn resource_select_base() -> &'static str {
     "SELECT id, name, remote_url, lore_repository_id, status, created_by_source FROM repositories"
 }
 

@@ -63,8 +63,9 @@ pub(super) async fn handle_login(
             "identity provider login not configured",
         );
     };
+    let return_to_admin = query.get("return_to").is_some_and(|value| value == "admin");
     if let Some(provider_id) = query.get("provider").filter(|id| !id.is_empty()) {
-        return redirect_found(auth_start_path(provider_id, ""));
+        return redirect_found(auth_start_path(provider_id, "", return_to_admin));
     }
     let providers = login.providers();
     if providers.is_empty() {
@@ -74,9 +75,12 @@ pub(super) async fn handle_login(
         );
     }
     if providers.len() == 1 {
-        return redirect_found(auth_start_path(&providers[0].id, ""));
+        return redirect_found(auth_start_path(&providers[0].id, "", return_to_admin));
     }
-    html_response(StatusCode::OK, provider_picker_html(&providers, ""))
+    html_response(
+        StatusCode::OK,
+        provider_picker_html(&providers, "", return_to_admin),
+    )
 }
 
 pub(super) async fn handle_login_session(
@@ -103,7 +107,7 @@ pub(super) async fn handle_login_session(
         }
     }
     if let Some(provider_id) = query.get("provider").filter(|id| !id.is_empty()) {
-        return redirect_found(auth_start_path(provider_id, &nonce));
+        return redirect_found(auth_start_path(provider_id, &nonce, false));
     }
     let providers = login.providers();
     if providers.is_empty() {
@@ -113,9 +117,12 @@ pub(super) async fn handle_login_session(
         );
     }
     if providers.len() == 1 {
-        return redirect_found(auth_start_path(&providers[0].id, &nonce));
+        return redirect_found(auth_start_path(&providers[0].id, &nonce, false));
     }
-    html_response(StatusCode::OK, provider_picker_html(&providers, &nonce))
+    html_response(
+        StatusCode::OK,
+        provider_picker_html(&providers, &nonce, false),
+    )
 }
 
 pub(super) async fn handle_auth_start(
@@ -133,6 +140,12 @@ pub(super) async fn handle_auth_start(
         return text_response(StatusCode::NOT_FOUND, "unknown identity provider");
     }
     let login_nonce = query.get("login_nonce").cloned().unwrap_or_default();
+    let return_path =
+        if login_nonce.is_empty() && query.get("return_to").is_some_and(|value| value == "admin") {
+            "/admin"
+        } else {
+            ""
+        };
     if !login_nonce.is_empty() {
         match state
             .services
@@ -161,6 +174,7 @@ pub(super) async fn handle_auth_start(
                 provider_id: provider_id.clone(),
                 nonce: nonce.clone(),
                 login_url_nonce: login_nonce,
+                return_path: return_path.to_owned(),
                 ..model::LoginStateInput::default()
             },
             LOGIN_STATE_TTL,
@@ -274,7 +288,12 @@ pub(super) async fn handle_auth_callback(
             ],
         );
     }
-    let mut response = redirect_found("/");
+    let destination = if login_state.return_path == "/admin" {
+        "/admin"
+    } else {
+        "/"
+    };
+    let mut response = redirect_found(destination);
     append_header(
         response.headers_mut(),
         header::SET_COOKIE,
@@ -302,12 +321,16 @@ fn query_params(raw: &str) -> HashMap<String, Vec<String>> {
     out
 }
 
-fn auth_start_path(provider_id: &str, login_nonce: &str) -> String {
+fn auth_start_path(provider_id: &str, login_nonce: &str, return_to_admin: bool) -> String {
     let mut path = format!("/auth/{}/start", encode_path_segment(provider_id));
-    if !login_nonce.is_empty() {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("login_nonce", login_nonce)
-            .finish();
+    if !login_nonce.is_empty() || return_to_admin {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        if !login_nonce.is_empty() {
+            serializer.append_pair("login_nonce", login_nonce);
+        } else if return_to_admin {
+            serializer.append_pair("return_to", "admin");
+        }
+        let query = serializer.finish();
         path.push('?');
         path.push_str(&query);
     }
@@ -330,13 +353,17 @@ fn random_url_token() -> String {
     Uuid::new_v4().as_simple().to_string()
 }
 
-fn provider_picker_html(providers: &[IdentityProviderDescriptor], login_nonce: &str) -> String {
+fn provider_picker_html(
+    providers: &[IdentityProviderDescriptor],
+    login_nonce: &str,
+    return_to_admin: bool,
+) -> String {
     let mut body = "<h1>Choose identity provider</h1>\n<ul>\n".to_owned();
     for provider in providers {
         let label = string_or(&provider.display_name, &provider.id);
         body.push_str(&format!(
             "  <li><a href=\"{}\">{}</a></li>\n",
-            html_escape(&auth_start_path(&provider.id, login_nonce)),
+            html_escape(&auth_start_path(&provider.id, login_nonce, return_to_admin)),
             html_escape(&label)
         ));
     }

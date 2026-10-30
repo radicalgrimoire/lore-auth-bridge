@@ -190,6 +190,10 @@ fn device_confirm_html(user_code: &str, csrf_token: &str, preview: &PreviewResul
 
 fn write_device_error(err: CoreError) -> Response {
     match err {
+        CoreError::MaintenanceMode => text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "token issuance is disabled during maintenance",
+        ),
         CoreError::DeviceInvalidCode => {
             text_response(StatusCode::BAD_REQUEST, "invalid device code")
         }

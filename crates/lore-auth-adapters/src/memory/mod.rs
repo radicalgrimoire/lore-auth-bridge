@@ -53,6 +53,7 @@ struct State {
     csrf_tokens: HashMap<String, CsrfToken>,
     tokens: HashMap<String, VerifiedToken>,
     issued_tokens: HashMap<String, IssuedToken>,
+    maintenance: lore_auth_core::model::MaintenanceSettings,
     admin_audit: Vec<AdminAuditEntry>,
     device_authorizations: HashMap<String, DeviceAuthorization>,
     device_code_index: HashMap<String, String>,

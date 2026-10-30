@@ -208,7 +208,6 @@ pub(crate) struct GroupMember {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum GroupNestCommand {
-    Add(GroupNest),
     Remove(GroupNest),
 }
 

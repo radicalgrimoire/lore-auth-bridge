@@ -227,7 +227,12 @@ impl UrcAuthApi for UrcAuthServer {
             .tokens
             .mint_authn(&user.id, None)
             .await
-            .map_err(|_| Status::unauthenticated("service account is not available"))?;
+            .map_err(|err| match err {
+                lore_auth_core::CoreError::MaintenanceMode => {
+                    Status::unavailable("token issuance is disabled during maintenance")
+                }
+                _ => Status::unauthenticated("service account is not available"),
+            })?;
         Ok(Response::new(ExchangeExternalTokenForUserTokenResponse {
             user_token: Some(user_token(token, user)),
         }))

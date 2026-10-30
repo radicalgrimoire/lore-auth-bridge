@@ -7,6 +7,7 @@ mod groups;
 mod guard;
 mod i18n;
 mod repositories;
+mod server_settings;
 mod simulator;
 mod static_assets;
 mod templates;
@@ -19,6 +20,7 @@ use askama::Template;
 use axum::{
     Router,
     body::Body,
+    extract::DefaultBodyLimit,
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{self, HeaderName},
@@ -34,21 +36,26 @@ use crate::httpserver::AppState;
 
 use dashboard::handle_dashboard;
 use groups::{
-    handle_group_add, handle_group_member_add, handle_group_member_remove, handle_group_nest_add,
-    handle_group_nest_remove, handle_groups,
+    handle_group_access, handle_group_add, handle_group_cidr_add, handle_group_cidr_remove,
+    handle_group_member_add, handle_group_member_remove, handle_group_nest_remove, handle_groups,
 };
 use repositories::{
-    handle_grant_add, handle_grant_remove, handle_repositories, handle_repository_add,
-    handle_repository_disable,
+    handle_grant_add, handle_grant_remove, handle_repositories, handle_repository_access,
+    handle_repository_add, handle_repository_clear_grants, handle_repository_delete,
+    handle_repository_disable, handle_repository_enable,
+};
+use server_settings::{
+    handle_maintenance_update, handle_server_settings, handle_service_account_add,
 };
 use simulator::{handle_simulator, handle_simulator_check};
 use static_assets::{handle_htmx, handle_pico};
 use users::{
-    handle_user_access, handle_user_add, handle_user_disable, handle_user_invite, handle_users,
+    handle_user_access, handle_user_add, handle_user_add_entra, handle_user_add_repositories,
+    handle_user_disable, handle_user_update_display_name, handle_user_update_entra_identity,
+    handle_users,
 };
 
 const ADMIN_LIST_LIMIT: usize = 100;
-const ADMIN_GROUP_EDGE_LIMIT: usize = 20;
 const ADMIN_CSRF_TTL: Duration = Duration::from_secs(10 * 60);
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -68,6 +75,16 @@ pub struct AdminConfig {
     pub admin_emails: Vec<String>,
     pub global_repository_admin: bool,
     pub allowed_peer_cidrs: Vec<IpNet>,
+    /// Entra ID providers (`entra_oid_tid` subject strategy) offered for direct user registration.
+    pub entra_providers: Vec<AdminEntraProvider>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminEntraProvider {
+    pub id: String,
+    pub display_name: String,
+    pub issuer: String,
+    pub tenant_id: String,
 }
 
 impl AdminConfig {
@@ -84,30 +101,84 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/admin/repositories", get(handle_repositories))
         .route("/admin/repositories", post(handle_repository_add))
         .route(
+            "/admin/repositories/:resource_id/access",
+            get(handle_repository_access),
+        )
+        .route(
             "/admin/repositories/:resource_id/disable",
             post(handle_repository_disable),
         )
-        .route("/admin/repositories/grants/add", post(handle_grant_add))
         .route(
-            "/admin/repositories/grants/remove",
+            "/admin/repositories/:resource_id/enable",
+            post(handle_repository_enable),
+        )
+        .route(
+            "/admin/repositories/:resource_id/delete",
+            post(handle_repository_delete),
+        )
+        .route(
+            "/admin/repositories/:resource_id/grants/add",
+            post(handle_grant_add),
+        )
+        .route(
+            "/admin/repositories/:resource_id/grants/remove",
             post(handle_grant_remove),
+        )
+        .route(
+            "/admin/repositories/:resource_id/grants/clear",
+            post(handle_repository_clear_grants),
         )
         .route("/admin/users", get(handle_users))
         .route("/admin/users", post(handle_user_add))
-        .route("/admin/users/invite", post(handle_user_invite))
+        .route("/admin/users/entra", post(handle_user_add_entra))
         .route("/admin/users/:id/disable", post(handle_user_disable))
         .route("/admin/users/:id/access", get(handle_user_access))
+        .route(
+            "/admin/users/:id/access",
+            post(handle_user_add_repositories).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/users/:id/display-name",
+            post(handle_user_update_display_name),
+        )
+        .route(
+            "/admin/users/:id/identities/:identity_id",
+            post(handle_user_update_entra_identity),
+        )
         .route("/admin/groups", get(handle_groups))
         .route("/admin/groups", post(handle_group_add))
-        .route("/admin/groups/members/add", post(handle_group_member_add))
+        .route("/admin/server-settings", get(handle_server_settings))
         .route(
-            "/admin/groups/members/remove",
+            "/admin/server-settings/maintenance",
+            post(handle_maintenance_update),
+        )
+        .route(
+            "/admin/server-settings/service-accounts",
+            post(handle_service_account_add),
+        )
+        .route("/admin/groups/:id/access", get(handle_group_access))
+        .route(
+            "/admin/groups/:id/members/add",
+            post(handle_group_member_add),
+        )
+        .route(
+            "/admin/groups/:id/members/remove",
             post(handle_group_member_remove),
         )
-        .route("/admin/groups/nests/add", post(handle_group_nest_add))
-        .route("/admin/groups/nests/remove", post(handle_group_nest_remove))
-        .route("/admin/simulator", get(handle_simulator))
-        .route("/admin/simulator", post(handle_simulator_check))
+        .route(
+            "/admin/groups/:id/nests/remove",
+            post(handle_group_nest_remove),
+        )
+        .route("/admin/groups/:id/cidrs/add", post(handle_group_cidr_add))
+        .route(
+            "/admin/groups/:id/cidrs/remove",
+            post(handle_group_cidr_remove),
+        )
+        .route("/admin/server-settings/simulator", get(handle_simulator))
+        .route(
+            "/admin/server-settings/simulator",
+            post(handle_simulator_check),
+        )
         .route("/admin/static/htmx.min.js", get(handle_htmx))
         .route("/admin/static/pico.min.css", get(handle_pico))
 }
@@ -182,13 +253,6 @@ pub(super) fn is_hx_target(headers: &HeaderMap, target: &str) -> bool {
         .is_some_and(|value| value == target)
 }
 
-pub(super) fn is_secure(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
-}
-
 pub(super) fn html_response(status: StatusCode, body: impl Into<Body>) -> Response {
     response_with_headers(
         status,
@@ -233,10 +297,4 @@ where
         }
     }
     response
-}
-
-pub(super) fn append_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
-    if let Ok(value) = HeaderValue::from_str(value) {
-        headers.append(name, value);
-    }
 }

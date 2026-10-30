@@ -135,6 +135,7 @@ pub struct JwtConfig {
 pub struct LoreConfig {
     pub default_remote_url: String,
     pub auth_url: String,
+    pub repository_create_url: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

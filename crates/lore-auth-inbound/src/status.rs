@@ -13,6 +13,9 @@ pub fn core_error_to_status(err: CoreError) -> Status {
         CoreError::PermissionDenied => Status::new(Code::PermissionDenied, "permission denied"),
         CoreError::Unauthenticated => Status::new(Code::Unauthenticated, "unauthenticated"),
         CoreError::Unsupported => Status::new(Code::Unimplemented, "unsupported"),
+        CoreError::MaintenanceMode => {
+            Status::unavailable("token issuance is disabled during maintenance")
+        }
         CoreError::SigningKeyUnavailable | CoreError::TokenIssueFailed => {
             Status::new(Code::Internal, "token issue failed")
         }

@@ -95,26 +95,29 @@ impl IssuedTokenLog for Store {
             .call(move |conn| {
                 let audience_json =
                     serde_json::to_string(&token.audience).unwrap_or_else(|_| "[]".to_owned());
-                conn.execute(
-                    "INSERT INTO issued_tokens (
+                let changed = conn
+                    .execute(
+                        "INSERT INTO issued_tokens (
                        jti, token_kind, user_id, service_account_id, repository_id,
                        lore_resource_id, role, kid, audience_json, issued_at, expires_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        token.jti,
-                        token.kind,
-                        none_if_empty(&token.user_id),
-                        Option::<String>::None,
-                        none_if_empty(&token.repository_id),
-                        none_if_empty(&token.lore_resource_id),
-                        token.role,
-                        token.kid,
-                        audience_json,
-                        token.issued_at,
-                        token.expires_at
-                    ],
-                )
-                .map_err(core_from_sql)?;
+                     ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+                       FROM maintenance_settings WHERE id = 1 AND enabled = 0",
+                        params![
+                            token.jti,
+                            token.kind,
+                            none_if_empty(&token.user_id),
+                            Option::<String>::None,
+                            none_if_empty(&token.repository_id),
+                            none_if_empty(&token.lore_resource_id),
+                            token.role,
+                            token.kid,
+                            audience_json,
+                            token.issued_at,
+                            token.expires_at
+                        ],
+                    )
+                    .map_err(core_from_sql)?;
+                require_affected(changed, CoreError::MaintenanceMode)?;
                 Ok(())
             })
             .await

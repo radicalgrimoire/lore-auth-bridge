@@ -17,8 +17,8 @@ use axum::{
 };
 use lore_auth_core::{
     ports::{
-        AccountQuery, AdminWritePortFactory, GrantQuery, GroupQuery, ResourceQuery, StateStore,
-        TokenSigner,
+        AccountQuery, AdminAuditLog, AdminWritePortFactory, GrantQuery, GroupQuery, ResourceQuery,
+        StateStore, TokenSigner,
     },
     service::{
         device::DeviceService, login::LoginService, permission::PermissionService,
@@ -28,6 +28,7 @@ use lore_auth_core::{
 use percent_encoding::{AsciiSet, CONTROLS};
 
 use crate::admin;
+use crate::repository_client::RepositoryCreator;
 
 use device::{handle_device_approve, handle_device_page, handle_device_start, handle_device_token};
 use login::{
@@ -80,11 +81,13 @@ pub struct Services {
     pub permissions: Arc<PermissionService>,
     pub accounts: Arc<dyn AccountQuery>,
     pub admin_writes: Arc<dyn AdminWritePortFactory>,
+    pub admin_audit: Arc<dyn AdminAuditLog>,
     pub groups: Arc<dyn GroupQuery>,
     pub grants: Arc<dyn GrantQuery>,
     pub state: Arc<dyn StateStore>,
     pub jwks: Arc<dyn TokenSigner>,
     pub device: Option<Arc<DeviceService>>,
+    pub repository_creator: Arc<dyn RepositoryCreator>,
 }
 
 #[derive(Clone)]

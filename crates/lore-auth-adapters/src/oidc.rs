@@ -16,8 +16,8 @@ use lore_auth_core::{
     },
 };
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, JsonWebKey,
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, JsonWebKey, Nonce,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
     reqwest,
 };

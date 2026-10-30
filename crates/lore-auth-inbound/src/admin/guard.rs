@@ -1,13 +1,13 @@
 //! Admin route guard, peer allowlist, and admin CSRF validation.
-//! The guard intentionally hides admin routes from unauthorized probes.
+//! Unauthenticated admin entry requests can start login; other unauthorized routes stay hidden.
 
 use std::net::SocketAddr;
 
 use axum::{
     extract::{Request, State, connect_info::ConnectInfo},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use lore_auth_core::{CoreError, model};
 
@@ -21,9 +21,19 @@ pub(crate) async fn guard_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    match require_admin(&state, request.headers(), peer).await {
+    let is_admin_entry =
+        request.method() == Method::GET && matches!(request.uri().path(), "/admin" | "/admin/");
+    match check_admin(&state, request.headers(), peer).await {
         Ok(_) => {}
-        Err(response) => return response,
+        Err(AdminGuardError::LoginRequired) if is_admin_entry => {
+            return (
+                StatusCode::FOUND,
+                [(header::LOCATION, "/login?return_to=admin")],
+            )
+                .into_response();
+        }
+        Err(AdminGuardError::LoginRequired) => return not_found(),
+        Err(AdminGuardError::Response(response)) => return response,
     }
     next.run(request).await
 }
@@ -33,40 +43,56 @@ pub(super) async fn require_admin(
     headers: &HeaderMap,
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> Result<httpserver::BrowserSession, Response> {
+    check_admin(state, headers, peer)
+        .await
+        .map_err(|err| match err {
+            AdminGuardError::LoginRequired => not_found(),
+            AdminGuardError::Response(response) => response,
+        })
+}
+
+enum AdminGuardError {
+    LoginRequired,
+    Response(Response),
+}
+
+async fn check_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> Result<httpserver::BrowserSession, AdminGuardError> {
     let cfg = &state.cfg.admin;
     if !cfg.enabled() {
-        return Err(not_found());
+        return Err(AdminGuardError::Response(not_found()));
     }
     if !cfg.allowed_peer_cidrs.is_empty() {
         let Some(ConnectInfo(addr)) = peer else {
-            return Err(not_found());
+            return Err(AdminGuardError::Response(not_found()));
         };
         if !cfg
             .allowed_peer_cidrs
             .iter()
             .any(|cidr| cidr.contains(&addr.ip()))
         {
-            return Err(not_found());
+            return Err(AdminGuardError::Response(not_found()));
         }
     }
     let session =
         match httpserver::current_browser_session(state.services.state.as_ref(), headers).await {
             Ok(Some(session)) => session,
-            // Admin routes are intentionally hidden from unauthenticated probes.
-            // Operators should log in through /login first, then open /admin.
-            Ok(None) => return Err(not_found()),
+            Ok(None) => return Err(AdminGuardError::LoginRequired),
             Err(CoreError::PermissionDenied | CoreError::Unauthenticated) => {
-                return Err(not_found());
+                return Err(AdminGuardError::Response(not_found()));
             }
             Err(_) => {
-                return Err(text_response(
+                return Err(AdminGuardError::Response(text_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session unavailable",
-                ));
+                )));
             }
         };
     if session.user.status != "active" {
-        return Err(not_found());
+        return Err(AdminGuardError::Response(not_found()));
     }
     let email = model::normalize_email(&session.user.email);
     if email.is_empty()
@@ -75,7 +101,7 @@ pub(super) async fn require_admin(
             .iter()
             .any(|admin| model::normalize_email(admin) == email)
     {
-        return Err(not_found());
+        return Err(AdminGuardError::Response(not_found()));
     }
     Ok(session)
 }

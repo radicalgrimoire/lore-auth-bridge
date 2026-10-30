@@ -6,12 +6,12 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use lore_auth_core::{
     CoreError,
-    model::{Grant, GrantEvidence, ResourceFilter, ResourcePermission},
+    model::{self, Grant, GrantEvidence, ResourceFilter, ResourcePermission},
     ports::{AuthorizationPolicy, GrantAdmin, GrantQuery},
 };
 
 use super::{
-    Store, grant_subject_keys_for_user, group_paths_for_user, repository_pk_for_resource_id,
+    State, Store, grant_subject_keys_for_user, group_paths_for_user, repository_pk_for_resource_id,
     resolve_exact_resource_id, resolve_grant_subject_id, resolve_resource_id_for_repo,
 };
 
@@ -24,6 +24,13 @@ impl AuthorizationPolicy for Store {
         action: &str,
     ) -> Result<bool, CoreError> {
         let state = self.lock();
+        if !state
+            .resources
+            .get(resource_id)
+            .is_some_and(|resource| resource.status == "active")
+        {
+            return Ok(false);
+        }
         Ok(grant_subject_keys_for_user(&state, user_id)
             .into_iter()
             .filter_map(|subject| state.grants.get(&subject))
@@ -40,6 +47,13 @@ impl AuthorizationPolicy for Store {
         let mut resources = HashMap::<String, HashSet<lore_auth_core::model::Permission>>::new();
         for subject in grant_subject_keys_for_user(&state, user_id) {
             for (resource_id, role) in state.grants.get(&subject).into_iter().flatten() {
+                if !state
+                    .resources
+                    .get(resource_id)
+                    .is_some_and(|resource| resource.status == "active")
+                {
+                    continue;
+                }
                 if !filter.prefix.is_empty() && !resource_id.starts_with(&filter.prefix) {
                     continue;
                 }
@@ -69,6 +83,35 @@ impl AuthorizationPolicy for Store {
 
 #[async_trait]
 impl GrantAdmin for Store {
+    async fn set_user_repository_roles(
+        &self,
+        user_id: &str,
+        repositories: &[model::DirectRepositoryRoles],
+    ) -> Result<(), CoreError> {
+        set_user_repository_roles_locked(&mut self.lock(), user_id, repositories)?;
+        Ok(())
+    }
+
+    async fn change_user_grants(
+        &self,
+        user_id: &str,
+        selected: &[String],
+        original: &[model::DirectRepositoryGrant],
+        role: &str,
+    ) -> Result<(), CoreError> {
+        change_user_grants_locked(&mut self.lock(), user_id, selected, original, role)?;
+        Ok(())
+    }
+
+    async fn add_user_grants(
+        &self,
+        user_id: &str,
+        resource_ids: &[String],
+        role: &str,
+    ) -> Result<Vec<Grant>, CoreError> {
+        add_user_grants_locked(&mut self.lock(), user_id, resource_ids, role)
+    }
+
     async fn add_grant(
         &self,
         subject_type: &str,
@@ -113,6 +156,207 @@ impl GrantAdmin for Store {
         }
         Ok(())
     }
+}
+
+pub(super) fn set_user_repository_roles_locked(
+    state: &mut State,
+    user_id: &str,
+    repositories: &[model::DirectRepositoryRoles],
+) -> Result<(Vec<Grant>, Vec<(model::DirectRepositoryGrant, String)>), CoreError> {
+    model::validate_direct_repository_roles(repositories)?;
+    if !state
+        .users
+        .get(user_id)
+        .is_some_and(|user| user.status != "deleted")
+    {
+        return Err(CoreError::NotFound);
+    }
+    let subject = ("user".to_owned(), user_id.to_owned());
+    let mut changes = Vec::new();
+    for repository in repositories {
+        let resource = state
+            .resources
+            .get(&repository.resource_id)
+            .filter(|resource| resource.status == "active")
+            .ok_or(CoreError::NotFound)?;
+        let current: Vec<_> = state
+            .grants
+            .get(&subject)
+            .and_then(|grants| grants.get(&repository.resource_id))
+            .cloned()
+            .into_iter()
+            .collect();
+        let mut expected = repository.expected_roles.clone();
+        expected.sort();
+        if current != expected {
+            return Err(CoreError::InvalidArgument(
+                "direct grants changed; reload the page and try again".to_owned(),
+            ));
+        }
+        if repository.desired_roles.len() > 1 {
+            return Err(CoreError::InvalidArgument(
+                "multiple direct roles are unsupported by the memory store".to_owned(),
+            ));
+        }
+        changes.push((repository, resource.name.clone()));
+    }
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (repository, name) in changes {
+        if repository.expected_roles == repository.desired_roles {
+            continue;
+        }
+        if let Some(role) = repository.expected_roles.first() {
+            removed.push((
+                model::DirectRepositoryGrant {
+                    resource_id: repository.resource_id.clone(),
+                    role: role.clone(),
+                },
+                name.clone(),
+            ));
+        }
+        let grants = state.grants.entry(subject.clone()).or_default();
+        if let Some(role) = repository.desired_roles.first() {
+            grants.insert(repository.resource_id.clone(), role.clone());
+            added.push(Grant {
+                id: uuid::Uuid::new_v4().to_string(),
+                subject_type: "user".to_owned(),
+                subject_id: user_id.to_owned(),
+                repository_id: name,
+                role: role.clone(),
+            });
+        } else {
+            grants.remove(&repository.resource_id);
+        }
+    }
+    Ok((added, removed))
+}
+
+pub(super) fn change_user_grants_locked(
+    state: &mut State,
+    user_id: &str,
+    selected: &[String],
+    original: &[model::DirectRepositoryGrant],
+    role: &str,
+) -> Result<(Vec<Grant>, Vec<(model::DirectRepositoryGrant, String)>), CoreError> {
+    if !state
+        .users
+        .get(user_id)
+        .is_some_and(|user| user.status != "deleted")
+    {
+        return Err(CoreError::NotFound);
+    }
+    let subject = ("user".to_owned(), user_id.to_owned());
+    let mut selected_ids = HashSet::new();
+    for id in selected {
+        if !id.starts_with("urc-") || !selected_ids.insert(id.as_str()) {
+            return Err(CoreError::InvalidArgument(
+                "invalid or duplicate repository".to_owned(),
+            ));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut removed = Vec::new();
+    for grant in original {
+        if !grant.resource_id.starts_with("urc-")
+            || !model::is_known_role(&grant.role)
+            || !seen.insert(grant.resource_id.as_str())
+        {
+            return Err(CoreError::InvalidArgument(
+                "invalid or duplicate direct grant".to_owned(),
+            ));
+        }
+        let resource = state
+            .resources
+            .get(&grant.resource_id)
+            .filter(|resource| resource.status == "active")
+            .ok_or(CoreError::NotFound)?;
+        if state
+            .grants
+            .get(&subject)
+            .and_then(|grants| grants.get(&grant.resource_id))
+            != Some(&grant.role)
+        {
+            return Err(CoreError::InvalidArgument(
+                "direct grants changed; reload the page and try again".to_owned(),
+            ));
+        }
+        if !selected_ids.contains(grant.resource_id.as_str()) {
+            removed.push((grant.clone(), resource.name.clone()));
+        }
+    }
+    let add: Vec<_> = selected
+        .iter()
+        .filter(|id| !seen.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let added = if add.is_empty() {
+        Vec::new()
+    } else {
+        add_user_grants_locked(state, user_id, &add, role)?
+    };
+    if let Some(grants) = state.grants.get_mut(&subject) {
+        for (grant, _) in &removed {
+            grants.remove(&grant.resource_id);
+        }
+    }
+    Ok((added, removed))
+}
+
+pub(super) fn add_user_grants_locked(
+    state: &mut State,
+    user_id: &str,
+    resource_ids: &[String],
+    role: &str,
+) -> Result<Vec<Grant>, CoreError> {
+    if resource_ids.is_empty() || !lore_auth_core::model::is_known_role(role) {
+        return Err(CoreError::InvalidArgument(
+            "select repositories and a valid role".to_owned(),
+        ));
+    }
+    if !state
+        .users
+        .get(user_id)
+        .is_some_and(|user| user.status != "deleted")
+    {
+        return Err(CoreError::NotFound);
+    }
+    let subject = ("user".to_owned(), user_id.to_owned());
+    let mut seen = HashSet::new();
+    let mut grants = Vec::new();
+    for resource_id in resource_ids {
+        if !resource_id.starts_with("urc-") || !seen.insert(resource_id) {
+            return Err(CoreError::InvalidArgument(
+                "invalid or duplicate repository".to_owned(),
+            ));
+        }
+        let resource = state
+            .resources
+            .get(resource_id)
+            .filter(|resource| resource.status == "active")
+            .ok_or(CoreError::NotFound)?;
+        if state
+            .grants
+            .get(&subject)
+            .is_some_and(|existing| existing.contains_key(resource_id))
+        {
+            return Err(CoreError::InvalidArgument(
+                "user already has a direct grant for a selected repository".to_owned(),
+            ));
+        }
+        grants.push(Grant {
+            id: uuid::Uuid::new_v4().to_string(),
+            subject_type: "user".to_owned(),
+            subject_id: user_id.to_owned(),
+            repository_id: resource.name.clone(),
+            role: role.to_owned(),
+        });
+    }
+    let existing = state.grants.entry(subject).or_default();
+    for resource_id in resource_ids {
+        existing.insert(resource_id.clone(), role.to_owned());
+    }
+    Ok(grants)
 }
 
 #[async_trait]

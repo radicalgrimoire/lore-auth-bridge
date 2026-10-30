@@ -66,6 +66,21 @@ struct NullPorts;
 
 #[async_trait]
 impl AccountDirectory for NullPorts {
+    async fn update_entra_identity(
+        &self,
+        _input: lore_auth_core::model::UpdateEntraIdentityInput,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported)
+    }
+
+    async fn update_user_display_name(
+        &self,
+        _user_id: &str,
+        _display_name: &str,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::NotFound)
+    }
+
     async fn resolve_login(
         &self,
         _req: LoginResolutionRequest,
@@ -111,6 +126,13 @@ impl AccountDirectory for NullPorts {
 
 #[async_trait]
 impl AccountQuery for NullPorts {
+    async fn external_identities_for_user(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<lore_auth_core::model::ExternalIdentity>, CoreError> {
+        Ok(Vec::new())
+    }
+
     async fn user_by_id(&self, _user_id: &str) -> Result<User, CoreError> {
         Err(CoreError::NotFound)
     }
@@ -408,6 +430,33 @@ impl GroupQuery for NullPorts {
 
 #[async_trait]
 impl GrantAdmin for NullPorts {
+    async fn set_user_repository_roles(
+        &self,
+        _user_id: &str,
+        _repositories: &[lore_auth_core::model::DirectRepositoryRoles],
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported)
+    }
+
+    async fn change_user_grants(
+        &self,
+        _user_id: &str,
+        _add: &[String],
+        _remove: &[lore_auth_core::model::DirectRepositoryGrant],
+        _role: &str,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported)
+    }
+
+    async fn add_user_grants(
+        &self,
+        _user_id: &str,
+        _resource_ids: &[String],
+        _role: &str,
+    ) -> Result<Vec<lore_auth_core::model::Grant>, CoreError> {
+        Err(CoreError::Unsupported)
+    }
+
     async fn add_grant(
         &self,
         _subject_type: &str,

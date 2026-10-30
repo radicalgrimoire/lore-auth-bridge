@@ -21,7 +21,8 @@ use lore_auth_core::{
     ports::{
         AccountDirectory, AuthorizationPolicy, BeginAuthRequest, BeginAuthResult,
         CompleteAuthRequest, DeviceCodeGenerator, GrantAdmin, GroupAdmin, IdentityProvider,
-        IdentityProviderDescriptor, IdentityProviderRegistry, StateStore, TokenSigner,
+        IdentityProviderDescriptor, IdentityProviderRegistry, MaintenanceAdmin, StateStore,
+        TokenSigner,
     },
     service::{
         device::{DeviceConfig, DeviceService},
@@ -47,6 +48,52 @@ fn token_service(store: &Arc<Store>) -> Arc<TokenService> {
         store.clone(),
         Some(store.clone()),
     ))
+}
+
+#[tokio::test]
+async fn maintenance_blocks_authn_and_all_resource_token_issuance() {
+    let store = Arc::new(Store::new());
+    let user = store.add_test_user(User {
+        id: "maintenance-user".into(),
+        email: "maintenance@example.com".into(),
+        status: "active".into(),
+        ..User::default()
+    });
+    store.add_test_resource(Resource {
+        name: "test-repo".into(),
+        resource_id: "urc-test-id".into(),
+        status: "active".into(),
+        ..Resource::default()
+    });
+    store.grant(&user.id, "urc-test-id");
+    let tokens = token_service(&store);
+    let (signed, _) = tokens.mint_authn(&user.id, None).await.unwrap();
+    let authn = tokens.verify_authn(&signed.token).await.unwrap();
+    let audited = store.audited("admin");
+    MaintenanceAdmin::set(&audited, true, 15).await.unwrap();
+    assert!(matches!(
+        tokens.mint_authn(&user.id, None).await,
+        Err(CoreError::MaintenanceMode)
+    ));
+    assert!(matches!(
+        tokens
+            .exchange_authz(authn.clone(), &["urc-test-id".into()], None)
+            .await,
+        Err(CoreError::MaintenanceMode)
+    ));
+    assert!(matches!(
+        tokens
+            .manual_mint_authz(&user.id, "test-repo", "writer", None)
+            .await,
+        Err(CoreError::MaintenanceMode)
+    ));
+    assert!(matches!(
+        tokens.device_mint_authz(&user.id, "test-repo").await,
+        Err(CoreError::MaintenanceMode)
+    ));
+    assert!(tokens.verify_authn(&signed.token).await.is_ok());
+    MaintenanceAdmin::set(&audited, false, 15).await.unwrap();
+    assert!(tokens.mint_authn(&user.id, None).await.is_ok());
 }
 
 struct RecordingSigner {

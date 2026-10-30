@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         "../../third_party/lore-proto/proto/epicurc/auth_api.proto",
         "../../third_party/lore-proto/proto/ucsauth/rebac_api.proto",
+        "../../third_party/lore-proto/proto/lore/repository/v1/repository_create.proto",
     ];
 
     tonic_build::configure()
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={proto_root}/epicurc/auth_api.proto");
     println!("cargo:rerun-if-changed={proto_root}/ucsauth/rebac_api.proto");
+    println!("cargo:rerun-if-changed={proto_root}/lore/repository/v1/repository_create.proto");
 
     Ok(())
 }

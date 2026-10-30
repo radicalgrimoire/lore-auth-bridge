@@ -18,84 +18,27 @@
   </form>
 </section>
 <section>
-  <h2>{{ self.t("admin.groups.member_add") }}</h2>
-  <form method="post" action="/admin/groups/members/add">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="group" placeholder='{{ self.t("admin.groups.group") }}' aria-label='{{ self.t("admin.groups.group") }}'>
-    <input type="text" name="user" placeholder='{{ self.t("admin.groups.user") }}' aria-label='{{ self.t("admin.groups.user") }}'>
-    <button type="submit">{{ self.t("admin.common.add") }}</button>
-  </form>
-</section>
-<section>
-  <h2>{{ self.t("admin.groups.nest_add") }}</h2>
-  <form method="post" action="/admin/groups/nests/add">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="parent_group" placeholder='{{ self.t("admin.groups.parent") }}' aria-label='{{ self.t("admin.groups.parent") }}'>
-    <input type="text" name="member_group" placeholder='{{ self.t("admin.groups.member_group") }}' aria-label='{{ self.t("admin.groups.member_group") }}'>
-    <button type="submit">{{ self.t("admin.common.add") }}</button>
-  </form>
-</section>
-<section>
-  {% if rows.len() >= limit %}
-  <p>{{ self.t("admin.list.limit_note") }} {{ limit }}</p>
-  {% endif %}
   {% if rows.is_empty() %}
   <p>{{ self.t("admin.groups.empty") }}</p>
   {% else %}
-  {% for group in rows %}
-  <article>
-    <header>
-      <strong>{{ group.name }}</strong>
-      <small>{{ group.description }}</small>
-    </header>
-    <div>
-      <h2>{{ self.t("admin.groups.members") }}</h2>
-      {% if group.members.is_empty() %}
-      <p>{{ self.t("admin.groups.no_members") }}</p>
-      {% else %}
-      <ul>
-        {% for member in group.members %}
-        <li>
-          {{ member.email }} {{ member.display_name }}
-          <form method="post" action="/admin/groups/members/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="group" value="{{ group.name }}">
-            <input type="hidden" name="user" value="{{ member.id }}">
-            <button type="submit">{{ self.t("admin.common.remove") }}</button>
-          </form>
-        </li>
-        {% endfor %}
-      </ul>
-      {% if group.members_more > 0 %}
-      <p>+{{ group.members_more }} {{ self.t("admin.groups.more") }}</p>
-      {% endif %}
-      {% endif %}
-    </div>
-    <div>
-      <h2>{{ self.t("admin.groups.nested_groups") }}</h2>
-      {% if group.nested_groups.is_empty() %}
-      <p>{{ self.t("admin.groups.no_nested_groups") }}</p>
-      {% else %}
-      <ul>
-        {% for nested in group.nested_groups %}
-        <li>
-          {{ nested.name }} {{ nested.description }}
-          <form method="post" action="/admin/groups/nests/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="parent_group" value="{{ group.name }}">
-            <input type="hidden" name="member_group" value="{{ nested.name }}">
-            <button type="submit">{{ self.t("admin.common.remove") }}</button>
-          </form>
-        </li>
-        {% endfor %}
-      </ul>
-      {% if group.nested_groups_more > 0 %}
-      <p>+{{ group.nested_groups_more }} {{ self.t("admin.groups.more") }}</p>
-      {% endif %}
-      {% endif %}
-    </div>
-  </article>
-  {% endfor %}
+  <table>
+    <thead><tr>
+      <th scope="col">{{ self.t("admin.groups.name") }}</th>
+      <th scope="col">{{ self.t("admin.groups.id") }}</th>
+      <th scope="col">{{ self.t("admin.users.access") }}</th>
+      <th scope="col">{{ self.t("admin.common.actions") }}</th>
+    </tr></thead>
+    <tbody>
+      {% for group in rows %}
+      <tr>
+        <td>{{ group.name }}</td>
+        <td>{{ group.id }}</td>
+        <td><a href="/admin/groups/{{ group.id_path }}/access">{{ self.t("admin.users.access_link") }}</a></td>
+        <td>-</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% endif %}
 </section>
 {% endblock %}

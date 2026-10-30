@@ -14,7 +14,7 @@ use tokio_rusqlite::{
     rusqlite::{self, OptionalExtension, Row},
 };
 
-use super::accounts::resolve_user_id_conn;
+use super::accounts::{resolve_user_id_conn, user_by_id_conn};
 use super::groups::group_id_by_name_or_id_conn;
 use super::{
     CoreResult, Store, collect_rows, core_from_driver, core_from_sql, new_id, require_affected,
@@ -23,6 +23,70 @@ use super::{
 
 #[async_trait]
 impl GrantAdmin for Store {
+    async fn set_user_repository_roles(
+        &self,
+        user_id: &str,
+        repositories: &[model::DirectRepositoryRoles],
+    ) -> CoreResult<()> {
+        let user_id = user_id.to_owned();
+        let repositories = repositories.to_vec();
+        self.conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                set_user_repository_roles_conn(&tx, &user_id, &repositories)?;
+                tx.commit().map_err(core_from_sql)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn change_user_grants(
+        &self,
+        user_id: &str,
+        selected: &[String],
+        original: &[model::DirectRepositoryGrant],
+        role: &str,
+    ) -> CoreResult<()> {
+        let user_id = user_id.to_owned();
+        let selected = selected.to_vec();
+        let original = original.to_vec();
+        let role = role.to_owned();
+        self.conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                change_user_grants_conn(&tx, &user_id, &selected, &original, &role)?;
+                tx.commit().map_err(core_from_sql)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
+    async fn add_user_grants(
+        &self,
+        user_id: &str,
+        resource_ids: &[String],
+        role: &str,
+    ) -> CoreResult<Vec<Grant>> {
+        let user_id = user_id.to_owned();
+        let resource_ids = resource_ids.to_vec();
+        let role = role.to_owned();
+        self.conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let grants = add_user_grants_conn(&tx, &user_id, &resource_ids, &role)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(grants.into_iter().map(|(grant, _)| grant).collect())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn add_grant(
         &self,
         subject_type: &str,
@@ -82,11 +146,219 @@ impl GrantQuery for Store {
     }
 }
 
+pub(super) fn set_user_repository_roles_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    repositories: &[model::DirectRepositoryRoles],
+) -> CoreResult<(
+    Vec<(Grant, String)>,
+    Vec<(model::DirectRepositoryGrant, String)>,
+)> {
+    model::validate_direct_repository_roles(repositories)?;
+    user_by_id_conn(conn, user_id)?;
+    let mut changes = Vec::new();
+    for repository in repositories {
+        let id = repository_id_by_resource_conn(conn, &repository.resource_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT role FROM grants WHERE subject_type = 'user' AND subject_id = ?1 AND repository_id = ?2 ORDER BY role"
+        ).map_err(core_from_sql)?;
+        let current = collect_rows(
+            stmt.query_map(params![user_id, id], |row| row.get::<_, String>(0))
+                .map_err(core_from_sql)?,
+        )?;
+        let mut expected = repository.expected_roles.clone();
+        expected.sort();
+        if current != expected {
+            return Err(CoreError::InvalidArgument(
+                "direct grants changed; reload the page and try again".to_owned(),
+            ));
+        }
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM repositories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(core_from_sql)?;
+        changes.push((repository, name));
+    }
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (repository, name) in changes {
+        for role in repository
+            .expected_roles
+            .iter()
+            .filter(|role| !repository.desired_roles.contains(role))
+        {
+            remove_grant_conn(conn, "user", user_id, &name, role)?;
+            removed.push((
+                model::DirectRepositoryGrant {
+                    resource_id: repository.resource_id.clone(),
+                    role: role.clone(),
+                },
+                name.clone(),
+            ));
+        }
+        for role in repository
+            .desired_roles
+            .iter()
+            .filter(|role| !repository.expected_roles.contains(role))
+        {
+            added.push((
+                add_grant_conn(conn, "user", user_id, &name, role)?,
+                name.clone(),
+            ));
+        }
+    }
+    Ok((added, removed))
+}
+
+pub(super) fn change_user_grants_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    selected: &[String],
+    original: &[model::DirectRepositoryGrant],
+    role: &str,
+) -> CoreResult<(
+    Vec<(Grant, String)>,
+    Vec<(model::DirectRepositoryGrant, String)>,
+)> {
+    user_by_id_conn(conn, user_id)?;
+    let mut selected_ids = HashSet::new();
+    for id in selected {
+        if !id.starts_with("urc-") || !selected_ids.insert(id.as_str()) {
+            return Err(CoreError::InvalidArgument(
+                "invalid or duplicate repository".to_owned(),
+            ));
+        }
+    }
+    let mut originals: HashMap<&str, Vec<&str>> = HashMap::new();
+    for grant in original {
+        if !grant.resource_id.starts_with("urc-") || !model::is_known_role(&grant.role) {
+            return Err(CoreError::InvalidArgument(
+                "invalid direct grant".to_owned(),
+            ));
+        }
+        let roles = originals.entry(&grant.resource_id).or_default();
+        if roles.contains(&grant.role.as_str()) {
+            return Err(CoreError::InvalidArgument(
+                "duplicate direct grant".to_owned(),
+            ));
+        }
+        roles.push(&grant.role);
+    }
+    let add: Vec<_> = selected
+        .iter()
+        .filter(|id| !originals.contains_key(id.as_str()))
+        .cloned()
+        .collect();
+    let mut removed = Vec::new();
+    for (resource_id, mut expected) in originals {
+        let repository_id = repository_id_by_resource_conn(conn, resource_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT role FROM grants WHERE subject_type = 'user' AND subject_id = ?1 AND repository_id = ?2 ORDER BY role"
+        ).map_err(core_from_sql)?;
+        let current = collect_rows(
+            stmt.query_map(params![user_id, repository_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(core_from_sql)?,
+        )?;
+        expected.sort_unstable();
+        if current.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+            return Err(CoreError::InvalidArgument(
+                "direct grants changed; reload the page and try again".to_owned(),
+            ));
+        }
+        if !selected_ids.contains(resource_id) {
+            let name: String = conn
+                .query_row(
+                    "SELECT name FROM repositories WHERE id = ?1",
+                    params![repository_id],
+                    |row| row.get(0),
+                )
+                .map_err(core_from_sql)?;
+            for role in expected {
+                removed.push((
+                    model::DirectRepositoryGrant {
+                        resource_id: resource_id.to_owned(),
+                        role: role.to_owned(),
+                    },
+                    name.clone(),
+                ));
+            }
+        }
+    }
+    let added = if add.is_empty() {
+        Vec::new()
+    } else {
+        add_user_grants_conn(conn, user_id, &add, role)?
+    };
+    for (grant, repo) in &removed {
+        remove_grant_conn(conn, "user", user_id, repo, &grant.role)?;
+    }
+    Ok((added, removed))
+}
+
+pub(super) fn add_user_grants_conn(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    resource_ids: &[String],
+    role: &str,
+) -> CoreResult<Vec<(Grant, String)>> {
+    if resource_ids.is_empty() || !model::is_known_role(role) {
+        return Err(CoreError::InvalidArgument(
+            "select repositories and a valid role".to_owned(),
+        ));
+    }
+    user_by_id_conn(conn, user_id)?;
+    let mut seen = HashSet::new();
+    let mut grants = Vec::new();
+    for resource_id in resource_ids {
+        if !resource_id.starts_with("urc-") || !seen.insert(resource_id) {
+            return Err(CoreError::InvalidArgument(
+                "invalid or duplicate repository".to_owned(),
+            ));
+        }
+        let repository_id = repository_id_by_resource_conn(conn, resource_id)?;
+        let existing = conn.query_row(
+            "SELECT 1 FROM grants WHERE subject_type = 'user' AND subject_id = ?1 AND repository_id = ?2",
+            params![user_id, repository_id], |_| Ok(())
+        ).optional().map_err(core_from_sql)?;
+        if existing.is_some() {
+            return Err(CoreError::InvalidArgument(
+                "user already has a direct grant for a selected repository".to_owned(),
+            ));
+        }
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM repositories WHERE id = ?1",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .map_err(core_from_sql)?;
+        let grant = add_grant_conn(conn, "user", user_id, &name, role)?;
+        grants.push((grant, name));
+    }
+    Ok(grants)
+}
+
 pub(super) fn add_grant_conn(
     conn: &rusqlite::Connection,
     subject_type: &str,
     subject_id: &str,
     repo: &str,
+    role: &str,
+) -> CoreResult<Grant> {
+    let repository_id = repository_id_by_name_conn(conn, repo)?;
+    add_grant_for_repository_conn(conn, subject_type, subject_id, &repository_id, role)
+}
+
+pub(super) fn add_grant_for_repository_conn(
+    conn: &rusqlite::Connection,
+    subject_type: &str,
+    subject_id: &str,
+    repository_id: &str,
     role: &str,
 ) -> CoreResult<Grant> {
     if !model::is_known_role(role) {
@@ -95,13 +367,12 @@ pub(super) fn add_grant_conn(
         )));
     }
     let subject_id = resolve_grant_subject_id_conn(conn, subject_type, subject_id)?;
-    let repository_id = repository_id_by_name_conn(conn, repo)?;
     let now = unix_now();
     let grant = Grant {
         id: new_id(),
         subject_type: subject_type.to_owned(),
         subject_id,
-        repository_id,
+        repository_id: repository_id.to_owned(),
         role: role.to_owned(),
     };
     conn.execute(
@@ -129,8 +400,18 @@ pub(super) fn remove_grant_conn(
     repo: &str,
     role: &str,
 ) -> CoreResult<()> {
-    let subject_id = resolve_grant_subject_id_conn(conn, subject_type, subject_id)?;
     let repository_id = repository_id_by_name_conn(conn, repo)?;
+    remove_grant_for_repository_conn(conn, subject_type, subject_id, &repository_id, role)
+}
+
+pub(super) fn remove_grant_for_repository_conn(
+    conn: &rusqlite::Connection,
+    subject_type: &str,
+    subject_id: &str,
+    repository_id: &str,
+    role: &str,
+) -> CoreResult<()> {
+    let subject_id = resolve_grant_subject_id_conn(conn, subject_type, subject_id)?;
     let changed = conn
         .execute(
             "DELETE FROM grants
@@ -450,7 +731,7 @@ fn resolve_grant_subject_id_conn(
     }
 }
 
-fn grant_from_row(row: &Row<'_>) -> rusqlite::Result<Grant> {
+pub(super) fn grant_from_row(row: &Row<'_>) -> rusqlite::Result<Grant> {
     Ok(Grant {
         id: row.get(0)?,
         subject_type: row.get(1)?,
