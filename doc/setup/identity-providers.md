@@ -1,80 +1,72 @@
 # Identity Providers
 
-[日本語](identity-providers.ja.md)
+identity provider は、bridge がユーザーの identity を得るための外部サービスまたは認証元です。
 
-An identity provider is an external service or authentication source from which the bridge obtains a user identity.
+bridge は、IdP から受け取った identity を bridge DB のユーザーと照合します。
 
-The bridge matches the identity returned by the IdP against users in the bridge DB.
+IdP を使わない運用では、管理 CLI で authn token を発行できます。
 
-When an operation does not use an IdP, an administrator can issue authn tokens with the CLI.
+config の provider key は provider instance ID です。
 
-Each configured provider key is a provider instance ID.
+`google`、`entra`、`keycloak-prod` のような安定した key を使い、adapter 種別だけを表す `oidc` を key にしないでください。
 
-Use stable keys such as `google`, `entra`, or `keycloak-prod`, not only the adapter type `oidc`.
+## Provider 別ページ
 
-## Provider Pages
+次の provider 別ページを参照できます。
 
-Use the provider-specific page that matches the IdP you operate:
+- [Microsoft Entra ID](entra-id.md)：`profile: entra` を使う Entra app registration。
 
-- [Google OIDC](google-oidc.md): Google Cloud OAuth client and Google Workspace trust checks.
-- [Microsoft Entra ID](entra-id.md): Entra app registration with `profile: entra`.
-- [Keycloak](keycloak.md): Keycloak realm and OIDC client setup with `profile: keycloak`.
+正確な `trust.email_binding` と `trust.allowed_email_domains` の挙動は [Configuration](configuration.md#identity_providers) にあります。
 
-The exact `trust.email_binding` and `trust.allowed_email_domains` behavior is documented in [Configuration](configuration.md#identity_providers).
+## IdP login
 
-## IdP Login
+IdP login では、ユーザーはブラウザで IdP にログインします。
 
-With IdP login, the user signs in through the IdP in a browser.
+bridge は IdP から返された external identity を、既存の binding または pending invitation と照合します。
 
-The bridge resolves the returned external identity against existing bindings or pending invitations.
+登録済みユーザーならブラウザセッションまたは CLI auth session が完了します。
 
-If the user is registered, the browser session or CLI auth session completes.
+未登録ユーザーなら token は発行されず、whoami 画面に identity が表示されます。
 
-If the user is not registered, no token is issued and the whoami page displays the identity.
+IdP が確認済み email を返す場合、管理者は `lore-authctl --config <cfg> user invite --idp <provider-id> --email <address>` でユーザーを事前登録できます。
 
-When the IdP returns verified email addresses, an administrator can preregister a user with `lore-authctl --config <cfg> user invite --idp <provider-id> --email <address>`.
+`trust.email_binding: verified_email_invitation` では、初回 login が招待済みの確認済み email を bind できます。正確な binding と `trust.allowed_email_domains` の規則は [Configuration](configuration.md#identity_providers) を参照してください。
 
-With `trust.email_binding: verified_email_invitation`, first login can bind the invited verified email; see [Configuration](configuration.md#identity_providers) for the exact binding and `trust.allowed_email_domains` rules.
-
-When `identity_providers` is configured, `user invite` requires `--idp`.
+`identity_providers` を設定している場合、`user invite` には `--idp` が必要です。
 
 ## Google OIDC
 
-Use `profile: google` with `subject.strategy: oidc_sub`.
+`profile: google` と `subject.strategy: oidc_sub` を使います。
 
-Google-specific checks use the ID token `hd` claim for Workspace hosted-domain policy and `trust.personal_accounts` for personal Google account policy.
-
-See [Google OIDC](google-oidc.md) for the complete setup.
+Google 固有の check では、Workspace hosted-domain policy に ID token の `hd` claim を使い、個人 Google アカウントの扱いに `trust.personal_accounts` を使います。
 
 ## Microsoft Entra ID
 
-Use `profile: entra` with `subject.strategy: entra_oid_tid`.
+`profile: entra` と `subject.strategy: entra_oid_tid` を使います。
 
-The subject is built from the ID token `tid` and `oid` claims.
+subject は ID token の `tid` claim と `oid` claim から作られます。
 
-`subject.required_tid` is required because a multi-tenant Entra setup can otherwise mix subjects from different tenants.
+multi-tenant Entra setup で tenant が混ざると subject が衝突し得るため、`subject.required_tid` は必須です。
 
-See [Microsoft Entra ID](entra-id.md) for the complete setup.
+完全な設定は [Microsoft Entra ID](entra-id.md) を参照してください。
 
 ## Keycloak
 
-Use `profile: keycloak` with `subject.strategy: oidc_sub`.
+`profile: keycloak` と `subject.strategy: oidc_sub` を使います。
 
-Keycloak uses the generic OIDC path and does not use Google hosted-domain or personal-account checks.
+Keycloak は generic OIDC path を使い、Google hosted-domain check と personal-account check は使いません。
 
-Do not set `trust.personal_accounts` for Keycloak.
+Keycloak では `trust.personal_accounts` を設定しないでください。
 
-See [Keycloak](keycloak.md) for the complete setup.
+## 管理 CLI で発行する authn token
 
-## Authn Tokens Issued By The Administrative CLI
+IdP login を使わない場合は、管理 CLI で authn token を発行できます。
 
-If IdP login is not used, an administrator can issue authn tokens with the administrative CLI.
+管理 CLI で user を登録し、`lore-authctl --config <cfg> token mint-authn <email>` で authn token を発行します。
 
-Register a user with the CLI, then issue an authn token with `lore-authctl --config <cfg> token mint-authn <email>`.
+この節では、IdP を使わない escape hatch として意図的に `user add` を使います。
 
-This section intentionally uses `user add` because it is the no-IdP escape hatch.
-
-For IdP onboarding with verified email binding, use `user invite` from the previous section.
+確認済み email binding を使う IdP onboarding では、前節の `user invite` を使います。
 
 ```bash
 lore-authctl --config .quickstart/lore-auth.yaml user add \
@@ -86,4 +78,4 @@ lore-authctl --config .quickstart/lore-auth.yaml token mint-authn \
   --out .quickstart/authn.jwt
 ```
 
-With this method, the administrator passes the issued token to `lore auth login --token-type lore` to register it in the Lore CLI.
+この方法では、管理者が発行した token を `lore auth login --token-type lore` に渡して Lore CLI に登録します。

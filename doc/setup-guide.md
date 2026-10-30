@@ -1,24 +1,22 @@
 # Setup Guide
 
-[日本語](setup-guide.ja.md)
+`lore-auth-bridge` の設定項目、TLS/JWKS、`loreserver` 連携、管理 CLI、管理 Web UI の使い方をまとめます。
 
-This guide covers `lore-auth-bridge` configuration, TLS/JWKS setup, `loreserver` integration, administrative CLI usage, and the admin Web UI.
+`lore-auth-bridge` は Lore の `UrcAuthApi` と `RebacApi` を実装する bridge です。
 
-`lore-auth-bridge` is a bridge that implements Lore's `UrcAuthApi` and `RebacApi`.
+ログインに使う IdP は差し替え可能です。
 
-The identity provider used for login is replaceable.
+Google OIDC は、この文書セットで扱う具体例の一つです。
 
-Google OIDC is one concrete example covered by this documentation set.
+## 読む順番
 
-## Reading Order
+次の順に読みます。
 
-Use this order:
+1. [構成要素](#構成要素) で bridge、`loreserver`、Lore CLI のつながりを把握します。
+2. [Hands-on Quickstart](setup/hands-on-quickstart.md) で、IdP を使わない単体完結の全体フローを体験します。
+3. 本番向けの形を個別ページで仕上げます。
 
-1. Read [Components](#components) to understand how the bridge, `loreserver`, and the Lore CLI fit together.
-2. Run [Hands-on Quickstart](setup/hands-on-quickstart.md) to experience the full flow in a self-contained no-IdP setup.
-3. Finish the production shape with the individual setup pages.
-
-Production setup pages:
+本番向けの設定ページ:
 
 - [Deployment](setup/deployment.md)
 - [Configuration](setup/configuration.md)
@@ -26,65 +24,66 @@ Production setup pages:
 - [TLS](setup/tls.md)
 - [Signing Keys](setup/signing-keys.md)
 - [Loreserver](setup/loreserver.md)
+- [Lore Server と Entra 認証付き bridge の構築](setup/on-prem-entra-lore-server.md)
+- [Entra ID 連携の変更根拠と検証記録](setup/entra-id-integration-evidence.md)
+- [Entra ID 対応: bridge 更新履歴と根拠](setup/entra-id-bridge-update-history.md)
 - [Authctl](setup/authctl.md)
-- [Admin Web UI](setup/admin-ui.md)
+- [管理 Web UI](setup/admin-ui.md)
 
-If you use IdP integration, also read:
+IdP 連携を使う場合は、次も読みます。
 
 - [Identity Providers](setup/identity-providers.md)
-  - [Google OIDC](setup/google-oidc.md) for the Google-specific example
-  - [Microsoft Entra ID](setup/entra-id.md) for Entra tenant setup
-  - [Keycloak](setup/keycloak.md) for Keycloak realm and client setup
+  - [Microsoft Entra ID](setup/entra-id.md)（Entra tenant の設定）
 
-If you expose the bridge and Lore remote through Tailscale, read [Deployment](setup/deployment.md#tailscale--vpn-mesh) first, then [Tailscale](setup/tailscale.md).
+Tailscale 越しに bridge と Lore remote を公開する場合は、先に [Deployment](setup/deployment.md#tailscale--vpn-mesh) を読み、その後に [Tailscale](setup/tailscale.md) を読みます。
 
-## Components
+## 構成要素
 
-A bridge deployment mainly consists of these parts:
+bridge を使う構成は、主に次の要素で成り立ちます。
 
-For the high-level diagram and glossary, see [README](../README.md#what-is-this--how-it-fits).
+全体図と用語集は [README](../README.md#これは何か--どう接続するか) を参照してください。
 
-- **bridge HTTP**: serves JWKS, browser login, device flow, and health checks.
-- **bridge gRPC**: serves `UrcAuthApi` and `RebacApi` over TLS.
-- **loreserver**: runs with auth enabled and uses the bridge JWKS and auth gRPC endpoint.
-- **lore CLI**: stores an authn token and exchanges it for authz tokens when operating on repositories.
+- **bridge HTTP**：JWKS、ブラウザログイン、device flow、health check を提供する。
+- **bridge gRPC**：`UrcAuthApi` と `RebacApi` を TLS で提供する。
+- **loreserver**：auth 有効化状態で bridge の JWKS と auth gRPC endpoint を使う。
+- **lore CLI**：authn token を保存し、repo 操作時に authz token を bridge から交換取得する。
 
-## Login And User Registration
+## ログインとユーザー登録
 
-The bridge issues the authn token used by the Lore CLI.
+bridge は、Lore CLI が使う authn token を発行します。
 
-The user identity behind the authn token comes either from the configured IdP or from administrative CLI registration.
+authn token の元になるユーザー identity は、設定した IdP から取得するか、管理 CLI で登録します。
 
-When IdP login is enabled, the user signs in through a browser.
+IdP login を使う場合、ユーザーはブラウザでログインします。
 
-The bridge binds the verified external identity returned by the IdP to a reserved bridge user.
+bridge は IdP から受け取った verified external identity を、予約済みの bridge user に bind します。
 
-The bridge does not issue tokens to unregistered users.
+登録されていないユーザーには token を発行しません。
 
-With IdP login, an administrator can preregister a user email with `lore-authctl --config <cfg> user invite --idp <provider-id> --email <email>`.
+IdP login では、管理者が `lore-authctl --config <cfg> user invite --idp <provider-id> --email <email>` でユーザーの email を事前登録できます。
 
-Use `user invite` for this onboarding path.
+このオンボーディングでは `user invite` を使います。
 
-`user add` is only a low-level escape hatch for accounts that do not rely on email-binding login.
+`user add` は、email binding login に依存しない account 向けの低レベル escape hatch です。
 
-When that user logs in for the first time and the IdP returns the same verified email, the login becomes usable.
+登録したユーザーが初回 login し、IdP から返された確認済み email が一致した場合、その login で利用できるようになります。
 
-When IdP login is not used, an administrator can issue an authn token with the CLI.
+IdP login を使わない場合は、管理 CLI で authn token を発行できます。
 
-In that mode, the administrator runs `lore-authctl --config <cfg> token mint-authn <email>` and passes the token to `lore auth login --token-type lore`.
+この場合、管理者が `lore-authctl --config <cfg> token mint-authn <email>` で token を発行し、`lore auth login --token-type lore` に渡して Lore CLI に登録します。
 
-## Operational Setup Flow
+## 運用設定の流れ
 
-In operation, align the deployment pattern, bridge HTTP endpoint, gRPC endpoint, SQLite database, JWT issuer/audience, RS256 signing key, and `loreserver` auth settings.
+運用では、deployment pattern、bridge の HTTP endpoint、gRPC endpoint、SQLite database、JWT issuer/audience、RS256 signing key、`loreserver` 側の auth 設定をそろえます。
 
-When IdP login is enabled, the IdP client configuration and the bridge configuration must also match.
+IdP login を使う場合は、IdP 側の client 設定と bridge 側の設定を一致させます。
 
-Manage users and repository permissions with `lore-authctl`.
+ユーザーとリポジトリ権限は `lore-authctl` で管理します。
 
-Choose the machine layout and storage pattern in [Deployment](setup/deployment.md).
+machine layout と storage pattern は [Deployment](setup/deployment.md) で選びます。
 
-Keep port exposure, data placement, backups, logs, and recovery procedures in [Operations](setup/operations.md).
+port 公開、data 配置、backup、log、recovery 手順は [Operations](setup/operations.md) にまとめます。
 
-## Full Flow Check
+## 全体フローの確認
 
-The repository creation and clone flow is covered by the self-contained [Hands-on Quickstart](setup/hands-on-quickstart.md).
+bridge、`loreserver`、`lore` CLI の接続から repository create、clone までの確認手順は、単体完結の [Hands-on Quickstart](setup/hands-on-quickstart.md) にあります。

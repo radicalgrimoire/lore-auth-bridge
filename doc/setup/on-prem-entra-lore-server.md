@@ -289,14 +289,10 @@ openssl s_client -connect 172.20.12.193:8081 -servername 172.20.12.193 </dev/nul
 
 Entra の `email_verified` は false になることがあるため、email invitation だけに依存せず Entra Object ID を bridge user に bind する。
 
-```bash
-# user を作成し、Entra Object ID を bind し、repository grant を追加する。
-/home/mgs/lore-auth/bin/onboard-entra-user.sh \
-  --email alice@example.com \
-  --name "Alice Example" \
-  --object-id "<entra-object-id>" \
-  --repo gamestudio/sandbox \
-  --role writer
-```
+当時の登録には現在廃止された onboarding script を使用した。現在は
+[管理 Web UI](admin-ui.md) から user の作成・binding と repository 権限の付与ができる。
+CLI を使う場合は [Authctl](authctl.md#user-add) の user 作成、
+[identity binding](authctl.md#user-bind-identity)、
+[grant 付与](authctl.md#grant-add) を参照する。
 
 最後に Windows PC へ `grpc.crt` を配布して trusted root に import し、`lore auth login lore://172.20.12.193:41337` を実行した。login 後は repository create または clone/push を実行し、認証だけでなく ReBAC による repository 権限も確認した。

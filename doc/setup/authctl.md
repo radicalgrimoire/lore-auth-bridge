@@ -1,12 +1,10 @@
 # Authctl
 
-[日本語](authctl.ja.md)
+`lore-authctl` は bridge の管理 CLI です。
 
-`lore-authctl` is the administrative CLI for the bridge.
+user、group、repository、grant、signing key、手動発行 token を管理します。
 
-It manages users, groups, repositories, grants, signing keys, and manually issued tokens.
-
-The examples below store the config path in a variable.
+以下の例では config path を変数にします。
 
 ```bash
 CONFIG=.quickstart/lore-auth.yaml
@@ -14,7 +12,7 @@ CONFIG=.quickstart/lore-auth.yaml
 
 ## init-db
 
-Create the SQLite database and apply migrations.
+SQLite database を作成し、migration を適用します。
 
 ```bash
 lore-authctl --config "$CONFIG" init-db
@@ -22,13 +20,13 @@ lore-authctl --config "$CONFIG" init-db
 
 ## key generate
 
-Create an RS256 signing key and register public JWK metadata in the DB.
+RS256 signing key を作り、DB に public JWK metadata を登録します。
 
 ```bash
 lore-authctl --config "$CONFIG" key generate --kid manual-1
 ```
 
-`--kid` must match `jwt.active_kid`.
+`--kid` は `jwt.active_kid` と一致させます。
 
 ## key list
 
@@ -38,11 +36,11 @@ lore-authctl --config "$CONFIG" key list
 
 ## user invite
 
-Use `user invite` as the normal onboarding command for IdP login.
+IdP login の通常のオンボーディングには `user invite` を使います。
 
-It creates the bridge account and a pending invitation that reserves identity binding for verified email login in one operation.
+このコマンドは、bridge account の作成と、確認済み email login による identity binding 予約（pending invitation）を 1 操作で行います。
 
-This flow assumes the provider uses `trust.email_binding: verified_email_invitation`.
+この流れは、provider が `trust.email_binding: verified_email_invitation` を使う前提です。
 
 ```bash
 PROVIDER_ID=company-sso
@@ -53,31 +51,51 @@ lore-authctl --config "$CONFIG" user invite \
   --name "Alice Example"
 ```
 
-This registration alone does not issue a token.
+この登録だけでは、まだ token は発行されません。
 
-When the user opens `/login` and the IdP returns a verified email that matches the invitation, that login becomes usable.
+ユーザーが `/login` し、IdP から返された確認済み email が一致した場合、その login で利用できるようになります。
 
-`--idp` reads the provider instance from `identity_providers.providers` and fills the stored provider ID and issuer.
+`--idp` は `identity_providers.providers` の provider instance を読み取り、保存する provider ID と issuer を補完します。
 
-When `identity_providers` is configured, `user invite` requires `--idp`.
+`identity_providers` を設定している場合、`user invite` には `--idp` が必要です。
 
 ## user add
 
-`user add` is a low-level escape hatch.
+`user add` は低レベルの escape hatch です。
 
-It creates only an active bridge principal.
+active な bridge principal だけを作成します。
 
-It does not create an external IdP binding, so the account cannot log in through an IdP as-is.
+external IdP binding は作成しないため、そのままでは IdP 経由で login できません。
 
-Normally, use `user invite` for onboarding.
+通常のオンボーディングには `user invite` を使います。
 
-Use `user add` for pre-provisioning or for deployments that use a subject strategy without email binding.
+`user add` は、事前プロビジョニングや、email binding を使わない subject strategy の環境で使います。
 
 ```bash
 lore-authctl --config "$CONFIG" user add \
   --email manual@example.com \
   --name "Manual User"
 ```
+
+## user bind-identity
+
+IdP が確認済み email を返さない場合は、管理者が IdP subject を user に明示的に結び付けます。
+対象の IdP account を管理画面で確認したうえで実行してください。
+
+Entra の `entra_oid_tid` では subject は `<tenant-id>:<object-id>` です。
+
+```bash
+lore-authctl --config "$CONFIG" user bind-identity \
+  --idp entra \
+  --email alice@example.com \
+  --subject "tenant-id:object-id"
+```
+
+同じ binding の再実行は安全です。別 user に結び付いた subject は拒否されます。
+
+管理 Web UI ではメール、表示名、Entra Object ID を指定して account 作成と binding を
+一括で実行できます。詳しくは [管理 Web UI](admin-ui.md) を参照してください。
+CLI で repository 権限を付与する場合は [grant add](#grant-add) を使います。
 
 ## user list
 
@@ -91,7 +109,7 @@ lore-authctl --config "$CONFIG" user list
 lore-authctl --config "$CONFIG" user disable manual@example.com
 ```
 
-Disabled users are rejected during token exchange.
+disabled user は token exchange で拒否されます。
 
 ## user enable
 
@@ -99,7 +117,21 @@ Disabled users are rejected during token exchange.
 lore-authctl --config "$CONFIG" user enable manual@example.com
 ```
 
-Use `user enable` to restore a disabled user.
+`user enable` は disabled user を復旧するときに使います。
+
+## service-account add
+
+既存 group の名前または ID を指定して service account を作成します。account 作成、
+group 所属、管理監査は一括して確定します。出力される client secret は安全に保管し、
+ログや共有場所に残さないでください。
+
+```bash
+lore-authctl --config "$CONFIG" service-account add \
+  --client-id ci-runner --name "CI Runner" --group ci-runners
+```
+
+login には所属 group に接続元 IP に一致する許可 CIDR が必要です。既存の未所属
+account は変更されず、作成後の group 所属解除も制限されません。
 
 ## group add
 
@@ -108,7 +140,7 @@ lore-authctl --config "$CONFIG" group add artists \
   --description "Artists with repository access"
 ```
 
-Groups are grant subjects.
+group は grant subject になります。
 
 ## group list
 
@@ -122,7 +154,7 @@ lore-authctl --config "$CONFIG" group list
 lore-authctl --config "$CONFIG" group member add artists alice@example.com
 ```
 
-The user argument accepts an email address or user ID.
+user argument には email address または user ID を指定できます。
 
 ## group member remove
 
@@ -132,7 +164,7 @@ lore-authctl --config "$CONFIG" group member remove artists alice@example.com
 
 ## group nest remove
 
-Neither the CLI nor the admin UI can create nested groups. The `phase7_remove_existing_group_nests_20261030` migration removes existing nested memberships once when the server or CLI opens the database, with admin audit records. Back up the database and review inherited access and service-account CIDRs before upgrading. This command can remove any remaining nested memberships.
+CLI と管理画面のどちらからも nested group を新規作成することはできません。`phase7_remove_existing_group_nests_20261030` migration は server または CLI が DB を開く際に既存の group 間の所属を一度だけ解除し、admin audit に記録します。更新前に DB をバックアップし、継承権限と service account の許可 CIDR を確認してください。このコマンドで残存する nested group を解除できます。
 
 ```bash
 lore-authctl --config "$CONFIG" group nest remove all-creators artists
@@ -140,9 +172,9 @@ lore-authctl --config "$CONFIG" group nest remove all-creators artists
 
 ## repo add
 
-Repositories are normally registered through ReBAC `CreateResource` calls from `loreserver`.
+通常は `loreserver` からの ReBAC `CreateResource` で repository が登録されます。
 
-Use the following command for manual registration.
+手動で登録する場合は次を使います。
 
 ```bash
 lore-authctl --config "$CONFIG" repo add \
@@ -151,9 +183,9 @@ lore-authctl --config "$CONFIG" repo add \
   --lore-repository-id 11111111111111111111111111111111
 ```
 
-The JWT `resources[].resource_id` value is `urc-{lore_repository_id}`.
+JWT claim の `resources[].resource_id` は `urc-{lore_repository_id}` です。
 
-It is not the repository name.
+repo 名ではありません。
 
 ## repo list
 
@@ -170,11 +202,11 @@ lore-authctl --config "$CONFIG" grant add \
   writer
 ```
 
-Subjects use the form `user:<email-or-id>` or `group:<name>`.
+subject は `user:<email-or-id>` または `group:<name>` の形式です。
 
-This documentation uses `writer` for repository operations.
+この文書では repository 操作用に `writer` を使います。
 
-It does not cover using `reader` as a read-only role.
+`reader` を read-only 権限として使う運用は、この文書では扱いません。
 
 ## grant list
 
@@ -195,7 +227,7 @@ lore-authctl --config "$CONFIG" grant remove \
 
 ## check
 
-Check the bridge-side authorization backend decision.
+bridge 側の authorization backend 判定を確認します。
 
 ```bash
 lore-authctl --config "$CONFIG" check \
@@ -204,11 +236,11 @@ lore-authctl --config "$CONFIG" check \
   write
 ```
 
-The command returns `allow` when access is permitted.
+許可されていれば `allow` を返します。
 
 ## token mint-authn
 
-When IdP login is not used, manually issue an authn token.
+IdP login を使わない場合は、authn token を手動発行します。
 
 ```bash
 lore-authctl --config "$CONFIG" token mint-authn \
@@ -216,17 +248,17 @@ lore-authctl --config "$CONFIG" token mint-authn \
   --out .quickstart/authn.jwt
 ```
 
-When `--out` is specified, the token is written to a file with mode `0600`, and no token or login command is printed.
+`--out` を指定すると、token は `0600` の file に書かれ、token 本文と token 入り login command は表示されません。
 
-Without `--out`, the token is printed to stdout.
+`--out` を指定しない場合、token は stdout に表示されます。
 
-If `--print-login-command` is also set, the `lore auth login` command containing the token is printed to stderr.
+さらに `--print-login-command` を明示すると、token 入りの `lore auth login` command を stderr に表示します。
 
-That output can remain in terminal logs, so do not use it in shared terminals or CI logs.
+その出力は terminal log に残り得るため、共有 terminal や CI log では使わないでください。
 
-Pass the issued token to `lore auth login --token-type lore`.
+発行した token は `lore auth login --token-type lore` に渡します。
 
-Use `--ttl 3600s`, `--ttl 15m`, or `--ttl 1h` to override the default authn token TTL.
+既定の authn token TTL を変える場合は、`--ttl 3600s`、`--ttl 15m`、`--ttl 1h` のように指定します。
 
 ```bash
 lore auth login \
@@ -238,9 +270,9 @@ lore auth login \
 
 ## token mint
 
-Manually issue a repository-scoped authz token.
+repo scoped authz token を手動発行します。
 
-During normal repository operations, the Lore CLI obtains authz tokens by calling `ExchangeUserTokenForMultiresourceToken`.
+通常の repository 操作では、Lore CLI が `ExchangeUserTokenForMultiresourceToken` を呼んで authz token を取得します。
 
 ```bash
 lore-authctl --config "$CONFIG" token mint \
@@ -249,8 +281,8 @@ lore-authctl --config "$CONFIG" token mint \
   --role writer
 ```
 
-Without `--out`, `token mint` prints the token to stdout.
+`--out` を指定しない場合、`token mint` は token を stdout に表示します。
 
-It prints a login command only when `--print-login-command` is set.
+token 入り login command を表示するのは、`--print-login-command` を付けた場合だけです。
 
-For browser-issued repository tokens from `/tokens` and `/tokens/mint`, see [Operations](operations.md#web-token-page).
+`/tokens` と `/tokens/mint` で browser から repository token を発行する場合は、[Operations](operations.md#web-token-page) を参照してください。

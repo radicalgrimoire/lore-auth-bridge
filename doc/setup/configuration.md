@@ -1,14 +1,12 @@
 # Configuration
 
-[日本語](configuration.ja.md)
+`lore-auth.yaml` は bridge の HTTP、gRPC、DB、JWT、Lore 連携、ログイン方式、admin UI を設定します。
 
-`lore-auth.yaml` configures the bridge HTTP server, gRPC server, DB, JWT settings, Lore integration, login method, and admin UI.
+unknown key は、すべての config object level で parse error になります。typo や未対応 key は、file に残さず削除してください。
 
-Unknown keys are parse errors at every config object level; remove typos or unsupported keys instead of leaving them in the file.
+このページでは、各項目の意味を説明します。
 
-This page explains each setting.
-
-See [Hands-on Quickstart](hands-on-quickstart.md) for the full flow check.
+全体フローの確認は [Hands-on Quickstart](hands-on-quickstart.md) を参照してください。
 
 ## server
 
@@ -21,23 +19,23 @@ server:
   public_base_url: "http://localhost:8080"
 ```
 
-`listen` is the HTTP server listen address.
+`listen` は HTTP server の listen address です。
 
-The HTTP server provides JWKS, health checks, browser login, and device flow.
+HTTP server は JWKS、health check、browser login、device flow を提供します。
 
-`grpc_listen` is the listen address for `UrcAuthApi` and `RebacApi`.
+`grpc_listen` は `UrcAuthApi` と `RebacApi` の listen address です。
 
-The Lore CLI and `loreserver` connect to it for auth exchange and ReBAC sync.
+Lore CLI と loreserver が auth exchange と ReBAC sync で接続します。
 
-`grpc_tls_cert_file` and `grpc_tls_key_file` are the gRPC TLS server certificate and key.
+`grpc_tls_cert_file` と `grpc_tls_key_file` は gRPC TLS server certificate です。
 
-See [TLS](tls.md) for certificate generation and trust configuration.
+TLS の作成と信頼設定は [TLS](tls.md) を参照してください。
 
-`public_base_url` is the external URL for the bridge HTTP/JWKS side.
+`public_base_url` は bridge の HTTP/JWKS 側の外部 URL です。
 
-Keeping it aligned with `jwt.issuer` makes verification easier.
+`jwt.issuer` と揃えると検証が分かりやすくなります。
 
-See [Operations](operations.md#ports) for default ports and exposure guidance.
+既定 port と公開方針は [Operations](operations.md#ports) を参照してください。
 
 ## database
 
@@ -46,9 +44,9 @@ database:
   path: ".quickstart/lore-auth.sqlite3"
 ```
 
-`path` is the SQLite database path.
+`path` は SQLite database のパスです。
 
-See [Operations](operations.md#data-layout) for file placement, WAL behavior, permissions, and backup guidance.
+file 配置、WAL の挙動、permission、backup は [Operations](operations.md#data-layout) を参照してください。
 
 ## authz
 
@@ -57,13 +55,13 @@ authz:
   backend: rebac
 ```
 
-`backend` selects the authorization evaluator.
+`backend` は authorization evaluator を選びます。
 
-`rebac` is the only supported backend and is the default.
+`rebac` が唯一の supported backend であり、既定値です。
 
-It evaluates SQLite-backed grants and group membership, including nested groups, through the authz-core ReBAC adapter.
+SQLite に保存した grant と group membership（nested group を含む）を authz-core ベースの ReBAC adapter で評価します。
 
-Most deployments can omit `authz.backend`.
+通常の構成では `authz.backend` を省略できます。
 
 ## jwt
 
@@ -78,27 +76,27 @@ jwt:
   active_kid: "manual-1"
 ```
 
-`issuer` is the `iss` value in JWTs issued by the bridge.
+`issuer` は bridge が発行する JWT の `iss` です。
 
-It must match `[server.auth].jwt_issuer` in `loreserver`.
+loreserver の `[server.auth].jwt_issuer` と一致させます。
 
-`audience` is the JWT `aud` value.
+`audience` は JWT の `aud` です。
 
-For local use, include both `lore-service` and the remote host, for example `localhost`.
+ローカルでは `lore-service` と remote host（例：`localhost`）を含めます。
 
-In production, include `lore-service` and the actual remote host, for example `lore.example.com`.
+本番では `lore-service` と実際の remote host（例：`lore.example.com`）を含めます。
 
-`ttl_seconds` is the default TTL for authn tokens.
+`ttl_seconds` は authn token の既定 TTL です。
 
-Authz token TTL is configured at server and CLI startup and is currently 15 minutes.
+authz token の TTL は server と CLI の起動時設定で 15 分にしています。
 
-`signing_key_dir` is the directory that stores private key files.
+`signing_key_dir` は private key file を置く directory です。
 
-`active_kid` is the key ID used for signing.
+`active_kid` は署名に使う active key の key ID です。
 
-See [Signing Keys](signing-keys.md) for key generation.
+鍵の作成は [Signing Keys](signing-keys.md) を参照してください。
 
-See [Operations](operations.md#data-layout) for private key directory permissions and backup guidance.
+private key directory の permission と backup は [Operations](operations.md#data-layout) を参照してください。
 
 ## lore
 
@@ -109,21 +107,21 @@ lore:
   repository_create_url: "http://127.0.0.1:41337"
 ```
 
-`default_remote_url` is the default Lore remote URL shown by token mint commands and UI.
+`default_remote_url` は token mint command や UI が表示する既定の Lore remote URL です。
 
-`repository_create_url` is the Lore gRPC endpoint used by the admin repository creation form. Leave it empty to disable creation. HTTP is allowed only with a loopback IP; other endpoints require HTTPS and a trusted certificate. See [Admin UI](admin-ui.md) for synchronization and partial-failure behavior.
+`repository_create_url` は管理画面の repository 作成に使用する Lore gRPC endpoint です。空の場合は作成できません。HTTP はループバック IP のみ使用でき、それ以外には信頼された証明書を持つ HTTPS が必要です。同期と部分的な失敗の扱いは [Admin UI](admin-ui.md) を参照してください。
 
-`auth_url` is the auth gRPC endpoint through which Lore reaches `UrcAuthApi` and `RebacApi`.
+`auth_url` は Lore が `UrcAuthApi` と `RebacApi` に到達する auth gRPC endpoint です。
 
-In the Hands-on Quickstart setup, use `https://localhost:8081`.
+Hands-on Quickstart の構成では `https://localhost:8081` を使います。
 
-When `lore.auth_url` is omitted, the bridge derives it from `server.public_base_url` by replacing the HTTP scheme with `ucs-auth://`.
+`lore.auth_url` を省略した場合、bridge は `server.public_base_url` の HTTP scheme を `ucs-auth://` に置き換えて既定値を作ります。
 
-For example, `https://auth.example.com` becomes `ucs-auth://auth.example.com`.
+たとえば `https://auth.example.com` からは `ucs-auth://auth.example.com` が作られます。
 
-When setting `lore.auth_url` explicitly, use an HTTPS gRPC endpoint for the `loreserver` integration and the quickstart examples.
+`lore.auth_url` を明示する場合、`loreserver` integration と quickstart の例では HTTPS の gRPC endpoint を使います。
 
-The config validator accepts `https://...` and `ucs-auth://...`.
+config validator は `https://...` と `ucs-auth://...` を受け付けます。
 
 ## admin
 
@@ -134,19 +132,19 @@ admin:
   global_repository_admin: false
 ```
 
-`admin_emails` enables the `/admin` Web UI and defines the allowed admin email addresses.
+`admin_emails` は `/admin` Web UI を有効化し、許可する admin email address を定義します。
 
-When this list is omitted or empty, `/admin` is not mounted and returns 404.
+この list を省略した場合、または空の場合、`/admin` は mount されず 404 を返します。
 
-Admins sign in through the configured OIDC login flow first, then open `/admin`.
+admin は、先に設定済みの OIDC login flow で sign in し、その後 `/admin` を開きます。
 
-The addresses are normalized before comparison.
+address は正規化してから比較されます。
 
-`global_repository_admin` defaults to `false`: UI administration alone does not grant repository access. When explicitly set to `true`, active accounts matching `admin_emails` receive `read`, `write`, and `admin` for every active repository, including repositories added later. This does not create database grants; disabling the option or removing an email removes this implicit access. Existing direct and group grants remain in effect. Unknown actions are not implicitly granted.
+`global_repository_admin` の既定値は `false` です。管理 UI の管理者というだけでは repository 権限は付与されません。明示的に `true` にすると、`admin_emails` に一致する有効な account は、後から追加されるものも含む全ての有効な repository に対して `read`、`write`、`admin` 権限を持ちます。DB に grant は作成されません。設定を無効にするか email を削除すると、この暗黙の権限はなくなります。既存の直接・group grant はそのまま有効です。未知の action は暗黙には許可されません。
 
-Lore `admin` can authorize operations beyond releasing other users' locks. Enable this only for trusted administrators. Restart `lore-auth-server` after changing the setting or email list. Previously issued authz tokens are not revoked by configuration changes and retain their claims until expiry; explicitly issued writer-scoped tokens remain writer-scoped.
+Lore の `admin` は他人の lock 解除以外の操作も許可する可能性があります。信頼できる管理者に対してのみ有効にしてください。設定や email list の変更後は `lore-auth-server` を再起動します。発行済み authz token は設定変更で無効化されず、期限まで既存の権限を保持します。明示的に writer として手動発行した token は writer 権限のままです。
 
-See [Admin Web UI](admin-ui.md) for the operational flow and security notes.
+運用手順と security note は [管理 Web UI](admin-ui.md) を参照してください。
 
 ## security
 
@@ -162,54 +160,55 @@ security:
     - "::1/128"
 ```
 
-`device_code_ttl_seconds` is the TTL for device flow user codes and device codes.
+`device_code_ttl_seconds` は device flow の user code と device code の TTL です。
 
-`device_poll_interval_seconds` is the device flow polling interval.
+`device_poll_interval_seconds` は device flow の polling interval です。
 
-Device flow uses `/api/device/start`, `/device`, and `/api/device/token` so a browserless Lore CLI or helper can request a repository token that a logged-in user approves in a browser.
+Device flow は `/api/device/start`、`/device`、`/api/device/token` を使い、browserless な Lore CLI または helper が、ログイン済み user に browser で承認してもらって repository token を取得する経路です。
 
-See [Operations](operations.md#device-flow) for endpoint behavior and token handling.
+endpoint の動作と token handling は [Operations](operations.md#device-flow) を参照してください。
 
-`session_ttl_seconds` is the TTL for browser sessions.
+`session_ttl_seconds` はブラウザセッションの TTL です。
 
-`auth_session_ttl_seconds` can be set when interactive auth sessions need a different TTL.
+interactive auth session に別の TTL を使う場合は、`auth_session_ttl_seconds` を設定できます。
 
-If omitted or set to zero, it defaults to `session_ttl_seconds`.
+省略した場合、または `0` の場合は `session_ttl_seconds` が使われます。
 
-`rebac_allowed_peer_cidrs` is the peer allowlist for `ucs.auth.RebacApi`.
+`rebac_allowed_peer_cidrs` は `ucs.auth.RebacApi` の peer allowlist です。
 
-`RebacApi` is treated as a service-to-service API dedicated to resource lifecycle sync from `loreserver`.
+`RebacApi` は loreserver からの resource lifecycle sync 専用 API として扱います。
 
-When this list is empty, the bridge only accepts ReBAC gRPC methods from loopback peers.
+空にした場合、bridge は ReBAC gRPC method を loopback peer からだけ受けます。
 
-If `loreserver` runs on another host, add the source CIDR from which `loreserver` reaches the bridge.
+loreserver が別 host で動く場合は、loreserver から bridge へ到達する送信元 CIDR を追加します。
 
-This check uses the TCP peer as seen directly by the bridge.
+この判定は bridge が直接受け取る TCP peer を見ます。
 
-If a public reverse proxy forwards traffic to a loopback bridge listener, the peer seen by the bridge is the proxy.
+公開 reverse proxy が bridge の loopback listener に転送する構成では、bridge から見える peer は proxy になります。
 
-In that topology, also restrict `/ucs.auth.RebacApi/*` at the reverse proxy to traffic from `loreserver`.
+その場合は reverse proxy 側でも `/ucs.auth.RebacApi/*` を loreserver からの通信だけに制限してください。
 
-`admin_allowed_peer_cidrs` is an optional second-layer peer allowlist for `/admin`.
+`admin_allowed_peer_cidrs` は `/admin` の任意の第二層 peer allowlist です。
 
-When it is set, admin routes return 404 unless the immediate TCP peer is inside the list.
+設定した場合、bridge が直接見る TCP peer が list に含まれない admin route は 404 を返します。
 
-Behind a reverse proxy, allow the proxy address and enforce the public admin source policy at the proxy.
+reverse proxy の背後では、proxy の address を許可し、公開側の admin 送信元制限は proxy で強制してください。
 
-The bridge does not trust `X-Forwarded-For` for this check.
+この判定では `X-Forwarded-For` を信頼しません。
 
-Configure rate limiting for public endpoints at the reverse proxy or load balancer.
+公開 endpoint の rate limit は reverse proxy または load balancer 側で設定します。
 
-The relevant endpoints are `/api/device/start`, `/api/device/token`, `/auth/{provider}/start`, and the gRPC `/epic_urc.UrcAuthApi/StartAuthSession`.
+対象は `/api/device/start`、`/api/device/token`、`/auth/{provider}/start`、gRPC の `/epic_urc.UrcAuthApi/StartAuthSession` です。
 
-Device flow and OAuth start endpoints are reachable by anonymous callers, so limit them by IP, forwarded client IP, or edge identity.
+device flow と OAuth start は匿名 caller から到達するため、IP、forwarded client IP、または edge identity に基づいて制限してください。
 
-The bridge also applies a small per-peer in-process rate limit to these public endpoints.
+bridge も、これらの公開 endpoint に小さな per-peer の in-process rate limit を適用します。
 
-That limit is defense in depth.
-Behind a reverse proxy, the bridge sees the proxy as the peer unless a trusted proxy policy is implemented, so the app-level limiter is not a replacement for edge rate limiting.
+この制限は defense in depth です。
+reverse proxy の背後では、trusted proxy policy を実装しない限り、bridge から見える peer は proxy になります。
+したがって、app 側 rate limit は edge rate limit の代替ではありません。
 
-See [Operations](operations.md#logs) for `RUST_LOG`, default filters, token display handling, and reverse-proxy log redaction.
+`RUST_LOG`、default filter、token 表示の扱い、reverse-proxy log redaction は [Operations](operations.md#logs) を参照してください。
 
 ## identity_providers
 
@@ -258,44 +257,42 @@ identity_providers:
           - "example.com"
 ```
 
-`identity_providers` configures one or more login identity provider instances.
+`identity_providers` は、login に使う identity provider instance を 1 個以上設定します。
 
-This section is the primary reference for `trust.email_binding`.
+この節を `trust.email_binding` の一次情報とします。
 
-`default` must reference a key under `providers`.
+`default` は `providers` 配下の key を指す必要があります。
 
-The provider key, such as `google` or `keycloak-prod`, is stored as the bridge identity provider instance ID.
+`google` や `keycloak-prod` などの provider key は、bridge 内の identity provider instance ID として保存されます。
 
-Do not use a generic value like `oidc` as the provider key if multiple issuers or tenants may exist.
+複数 issuer や複数 tenant を扱う可能性がある場合、provider key に `oidc` のような種別名を使わないでください。
 
-For OIDC providers, `redirect_url` must use `/auth/{provider}/callback`.
+OIDC 系 provider の `redirect_url` は `/auth/{provider}/callback` にします。
 
-See [Google OIDC](google-oidc.md) for concrete Google settings.
+`profile: google` は Google 用の trust policy check を有効にします。
 
-`profile: google` enables Google trust policy checks.
+`trust.hosted_domain.allowed` は、Google ID token の `hd` claim で許可する Workspace domain です。
 
-`trust.hosted_domain.allowed` is the set of Workspace domains allowed through the Google ID token `hd` claim.
+値を入れると、`hd` がその一覧に一致しない login を拒否します。
 
-When set, logins whose `hd` claim is not in the list are rejected.
+`trust.personal_accounts: deny` は、`hd` claim を持たない個人 Google アカウントを拒否します。
 
-`trust.personal_accounts: deny` rejects personal Google accounts without an `hd` claim.
+`trust.hosted_domain.allowed` が空で `trust.personal_accounts` が `deny` でない場合、bridge に登録済みの Workspace アカウントと個人 Google アカウントの両方を許可します。
 
-If `trust.hosted_domain.allowed` is empty and `trust.personal_accounts` is not `deny`, the bridge allows both registered Workspace accounts and registered personal Google accounts.
+`trust.email_binding` は、初回 login 時に pending invitation を消費できるかどうかを制御します。
 
-`trust.email_binding` controls whether a pending invitation can be consumed during first login.
+`verified_email_invitation` は、ID token に同じ provider と issuer の pending invitation に一致する確認済み email が含まれる場合だけ、IdP login が external identity binding を作れることを意味します。
 
-`verified_email_invitation` means the IdP login can create an external identity binding only when the ID token contains a verified email matching a pending invitation for the same provider and issuer.
+`disabled` の場合、`lore-authctl user invite` は pending invitation を作成しますが、login はそれを消費しません。
 
-`disabled` means `lore-authctl user invite` still creates pending invitations, but login will not consume them.
+既存の external identity binding は email に関係なく `provider_id`、`issuer`、`subject` で解決されます。
 
-An existing external identity binding resolves by `provider_id`, `issuer`, and `subject` regardless of email.
+`trust.allowed_email_domains` は、verified email invitation を消費するときの追加条件です。
 
-`trust.allowed_email_domains` is an additional condition for consuming a verified-email invitation.
+login 全体の allowlist ではありません。
 
-It is not a global login allowlist.
+設定した場合、invitation を消費する前に、ID token の email が確認済みで、domain が設定値に含まれている必要があります。
 
-When it is set, the ID token email must be verified and its domain must be in the configured list before the invitation can be consumed.
+`subject.strategy: oidc_sub` は、永続 identity subject として ID token の `sub` claim を使います。
 
-`subject.strategy: oidc_sub` uses the ID token `sub` claim as the persistent subject.
-
-Do not use email, preferred username, or UPN claims as the persistent identity subject.
+email、preferred username、UPN claim を永続 identity subject として使わないでください。

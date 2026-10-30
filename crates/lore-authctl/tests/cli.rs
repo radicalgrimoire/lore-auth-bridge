@@ -416,6 +416,127 @@ fn authctl_group_commands_record_admin_audit() {
 }
 
 #[test]
+fn service_account_add_requires_group_and_is_atomic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = write_config(dir.path());
+    assert_success(run(&config, &["init-db"]));
+    let group_output = assert_success(run(&config, &["group", "add", "ci-runners"]));
+    let group_id = group_output.split('\t').next().expect("group ID").trim();
+
+    let (_, stderr) = assert_failure(run(
+        &config,
+        &["service-account", "add", "--client-id", "missing-group"],
+    ));
+    assert!(stderr.contains("--group"));
+    let (_, stderr) = assert_failure(run(
+        &config,
+        &[
+            "service-account",
+            "add",
+            "--client-id",
+            "missing-group",
+            "--group",
+            "nonexistent",
+        ],
+    ));
+    assert!(stderr.contains("group not found"));
+    let (_, stderr) = assert_failure(run(
+        &config,
+        &[
+            "service-account",
+            "add",
+            "--client-id",
+            "missing-group",
+            "--group",
+            " ",
+        ],
+    ));
+    assert!(stderr.contains("group must not be empty"));
+
+    let cfg = config::load(&config).expect("config loads");
+    let conn = rusqlite::Connection::open(&cfg.database.path).expect("open sqlite");
+    install_admin_audit_failure_trigger(&config);
+    let (_, stderr) = assert_failure(run(
+        &config,
+        &[
+            "service-account",
+            "add",
+            "--client-id",
+            "ci-runner",
+            "--group",
+            "ci-runners",
+        ],
+    ));
+    assert!(stderr.contains("audit"));
+    for table in ["users", "service_accounts", "group_members"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count rows");
+        assert_eq!(count, 0, "{table}");
+    }
+    conn.execute_batch("DROP TRIGGER fail_admin_audit")
+        .expect("remove failing audit trigger");
+
+    let output = assert_success(run(
+        &config,
+        &[
+            "service-account",
+            "add",
+            "--client-id",
+            "ci-runner",
+            "--name",
+            "CI Runner",
+            "--group",
+            "ci-runners",
+        ],
+    ));
+    let fields: Vec<_> = output.trim().split('\t').collect();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[1], "ci-runner");
+    assert!(!fields[2].is_empty());
+    let member_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM group_members WHERE group_id = ?1 AND user_id = ?2",
+            rusqlite::params![group_id, fields[0]],
+            |row| row.get(0),
+        )
+        .expect("count group members");
+    assert_eq!(member_count, 1);
+    let entries = list_admin_audit(&config);
+    assert_eq!(
+        action_counts(&entries),
+        BTreeMap::from([
+            ("group.add", 1),
+            ("group.member.add", 1),
+            ("service_account.add", 1),
+        ])
+    );
+    assert!(
+        entries.iter().all(|entry| {
+            entry.actor.starts_with("authctl:") && !entry.detail.contains(fields[2])
+        })
+    );
+
+    assert_success(run(
+        &config,
+        &[
+            "service-account",
+            "add",
+            "--client-id",
+            "second-runner",
+            "--group",
+            group_id,
+        ],
+    ));
+    assert_success(run(
+        &config,
+        &["service-account", "rotate", "--client-id", "ci-runner"],
+    ));
+}
+
+#[test]
 fn authctl_rolls_back_mutation_when_audit_logging_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = write_config(dir.path());

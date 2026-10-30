@@ -1,49 +1,47 @@
 # Operations
 
-[日本語](operations.ja.md)
+このページは、port、local data、backup、log、recovery、browser token page、device flow の運用リファレンスです。
 
-This page is the operational reference for ports, local data, backups, logs, recovery, the browser token page, and device flow.
+[Configuration](configuration.md)、[Authctl](authctl.md)、[管理 Web UI](admin-ui.md) と合わせて使います。
 
-Use it with [Configuration](configuration.md), [Authctl](authctl.md), and [Admin Web UI](admin-ui.md).
-
-For choosing where the bridge, `loreserver`, and reverse proxy run, start with [Deployment](deployment.md).
+bridge、`loreserver`、reverse proxy をどこで動かすかを選ぶ場合は、[Deployment](deployment.md) から読んでください。
 
 ## Ports
 
-| Listener | Default | What runs there | Exposure |
+| Listener | 既定値 | 乗るもの | 公開要否 |
 | --- | --- | --- | --- |
-| HTTP `server.listen` | `127.0.0.1:8080` | `/.well-known/jwks.json`, `/healthz`, `/login`, `/auth/{provider}/*`, `/tokens`, `/device`, `/api/device/*`, and optional `/admin` | Put behind an HTTPS reverse proxy when users or `loreserver` need to reach it. Restrict `/admin` at the edge. See [Deployment](deployment.md#reverse-proxy). |
-| gRPC `server.grpc_listen` | `127.0.0.1:8081` | `epic_urc.UrcAuthApi` for auth sessions and token exchange; `ucs.auth.RebacApi` for repository create/delete sync | Expose with TLS to the Lore CLI and `loreserver`. Restrict `RebacApi` to `loreserver` with `security.rebac_allowed_peer_cidrs` or an edge ACL. See [Deployment](deployment.md#placement-principles). |
+| HTTP `server.listen` | `127.0.0.1:8080` | `/.well-known/jwks.json`、`/healthz`、`/login`、`/auth/{provider}/*`、`/tokens`、`/device`、`/api/device/*`、任意の `/admin` | user または `loreserver` から到達させる場合は HTTPS reverse proxy の背後に置きます。`/admin` は edge で制限します。[Deployment](deployment.md#reverse-proxy) も参照してください。 |
+| gRPC `server.grpc_listen` | `127.0.0.1:8081` | auth session と token exchange 用の `epic_urc.UrcAuthApi`、repository create/delete sync 用の `ucs.auth.RebacApi` | Lore CLI と `loreserver` から TLS で到達させます。`RebacApi` は `security.rebac_allowed_peer_cidrs` または edge ACL で `loreserver` に制限します。[Deployment](deployment.md#配置原則) も参照してください。 |
 
-The HTTP and gRPC listeners are separate sockets.
+HTTP と gRPC は別 socket です。
 
-If a reverse proxy fronts either listener, the bridge sees the proxy as the immediate TCP peer.
+reverse proxy がどちらかの listener の前にある場合、bridge から見える immediate TCP peer は proxy です。
 
 ## Data Layout
 
-`database.path` points to the main SQLite database file.
+`database.path` は main SQLite database file を指します。
 
-The server creates the parent directory when opening the database.
+server は database を開くときに parent directory を作成します。
 
-The database stores users, groups, repositories, grants, auth sessions, device authorizations, issued-token metadata, signing-key metadata, and admin audit entries.
+database には user、group、repository、grant、auth session、device authorization、issued-token metadata、signing-key metadata、admin audit entry が入ります。
 
-Issued-token metadata does not include the JWT body.
+issued-token metadata には JWT 本文は入りません。
 
-The SQLite adapter enables WAL mode, so a running server can also create adjacent `-wal` and `-shm` files next to the main database.
+SQLite adapter は WAL mode を有効にするため、稼働中の server は main database の隣に `-wal` と `-shm` file を作ることがあります。
 
-Make the database directory readable and writable only by the service user.
+database directory は service user だけが読み書きできる権限にします。
 
-`jwt.signing_key_dir` stores private signing-key PEM files.
+`jwt.signing_key_dir` には signing key の private PEM file を置きます。
 
-On Unix, `key generate` creates the directory with mode `0700` and private key files with mode `0600`.
+Unix では、`key generate` が directory を mode `0700`、private key file を mode `0600` で作成します。
 
-The database stores the public JWK and private key path, so restore the database and signing-key directory from the same backup set.
+database には public JWK と private key path が保存されるため、database と signing-key directory は同じ backup set から復元します。
 
 ## Backups
 
-For an offline backup, stop `lore-auth-server` and any `lore-authctl` process that may write to the DB, then copy the database and signing-key directory.
+offline backup では、`lore-auth-server` と DB に書き込み得る `lore-authctl` process を止めてから、database と signing-key directory を copy します。
 
-If `-wal` or `-shm` files remain beside the database after shutdown, copy them with the main database file or make a SQLite backup instead.
+停止後も database の隣に `-wal` または `-shm` file が残っている場合は、main database file と一緒に copy するか、SQLite backup を作ります。
 
 ```bash
 sudo systemctl stop lore-auth-server
@@ -51,84 +49,88 @@ cp -a /var/lib/lore-auth/lore-auth.sqlite3* /backup/lore-auth/
 cp -a /etc/lore-auth/keys /backup/lore-auth/keys
 ```
 
-For a live backup, use SQLite's backup mechanisms instead of copying the main database file.
+live backup では、main database file の copy ではなく SQLite の backup mechanism を使います。
 
-Both commands below produce a single SQLite backup file.
+次のどちらも単一の SQLite backup file を作ります。
 
 ```bash
 sqlite3 /var/lib/lore-auth/lore-auth.sqlite3 ".backup '/backup/lore-auth.sqlite3'"
 sqlite3 /var/lib/lore-auth/lore-auth.sqlite3 "VACUUM INTO '/backup/lore-auth-vacuum.sqlite3';"
 ```
 
-Back up the signing-key directory at the same time as the database.
+signing-key directory は database と同じタイミングで backup します。
 
-Without the private key files, existing signed tokens and the configured active key cannot be used after restore.
+private key file がないと、既存の signed token と設定済み active key を restore 後に使えません。
+
+Entra の client secret は database や signing key とは別に管理します。配置権限、検証、
+更新と復旧の手順は [Microsoft Entra ID](entra-id.md#client-secret-のファイル配置と検証) を
+参照し、必要な復旧用コピーを適切に保護します。
 
 ## Logs
 
-`lore-auth-server` uses `tracing_subscriber` with `RUST_LOG`.
+`lore-auth-server` は `tracing_subscriber` と `RUST_LOG` を使います。
 
-When `RUST_LOG` is unset, the default filter is `info,authz_core=warn`.
+`RUST_LOG` を設定しない場合の default filter は `info,authz_core=warn` です。
 
 ```bash
 RUST_LOG=info,lore_auth_server=debug,lore_auth_inbound=debug \
   lore-auth-server --config /etc/lore-auth/lore-auth.yaml
 ```
 
-The issued-token log stores token metadata such as `jti`, kind, user, resource, key ID, audience, issue time, and expiry.
+issued-token log は `jti`、kind、user、resource、key ID、audience、issue time、expiry などの metadata を保存します。
 
-It does not store JWT bodies.
+JWT 本文は保存しません。
 
-The server does not intentionally log token bodies.
+server は token 本文を意図的には log に出しません。
 
-Some operator-facing flows display token bodies by design, including `lore-authctl token mint-authn` without `--out`, `--print-login-command`, `token mint`, and the Web Token Page below.
+一方で、`--out` なしの `lore-authctl token mint-authn`、`--print-login-command`、`token mint`、下記の Web Token Page など、運用者向け flow は設計上 token 本文を表示します。
 
-Do not capture those outputs in shared terminals, CI logs, shell history, browser history, or reverse-proxy logs.
+これらの出力を共有 terminal、CI log、shell history、browser history、共有 clipboard manager、support log に残さないでください。
 
-Configure reverse-proxy access logs to omit or redact query strings and sensitive path values such as OAuth `code`, device `user_code`, `/login/session/{nonce}`, and token bodies.
+reverse-proxy access log は、OAuth `code`、device `user_code`、`/login/session/{nonce}`、token 本文などの query string と sensitive path value を省略または redact する設定にします。
 
 ## Recovery
 
-If an admin user is disabled by mistake, re-enable the account with `authctl`.
+admin user を誤って disable した場合は、`authctl` で account を有効化します。
 
 ```bash
 lore-authctl --config /etc/lore-auth/lore-auth.yaml user enable admin@example.com
 ```
 
-If the IdP is unavailable, continue administrative changes with `lore-authctl`.
+IdP が利用できない場合は、`lore-authctl` で管理変更を続けます。
 
-The CLI writes through the same audited administrative adapters as the Web UI.
+CLI は Web UI と同じ audited administrative adapter 経由で書き込みます。
 
-For no-IdP access to Lore, register the user and issue an authn token with the CLI as shown in [Authctl](authctl.md#token-mint-authn).
+IdP を使わずに Lore に入る場合は、[Authctl](authctl.md#token-mint-authn) の手順で user を登録し、authn token を発行します。
 
 ## Web Token Page
 
-The HTTP server provides `/tokens` and `/tokens/mint` for browser-issued Lore tokens.
+HTTP server は browser から Lore token を発行する `/tokens` と `/tokens/mint` を提供します。
 
-`/tokens` requires a logged-in browser session and redirects to `/login` otherwise.
+`/tokens` はログイン済み browser session を要求し、未ログインなら `/login` に redirect します。
 
-It lists repositories where the current user has write permission.
+現在の user に write permission がある repository だけを一覧します。
 
-`/tokens/mint` checks same-origin headers and a CSRF token, then issues a writer authz token for the selected repository.
+`/tokens/mint` は same-origin header と CSRF token を確認し、選択された repository の writer authz token を発行します。
 
-The result page displays the token body and a `lore auth login --token-type lore` command.
+結果画面には token 本文と `lore auth login --token-type lore` command が表示されます。
 
-Use this page only from a trusted private browser session, and do not leave the result in screenshots, browser history, shared clipboard managers, or support logs.
+この page は信頼できる private browser session だけで使い、結果を screenshot、browser history、共有 clipboard manager、support log に残さないでください。
 
 ## Device Flow
 
-Device flow is the HTTP path for a Lore CLI or helper running without an interactive browser to request a repository token that a logged-in user approves in a browser.
+Device flow は、interactive browser を持たない Lore CLI または helper が、ログイン済み user に browser で承認してもらい repository token を取得するための HTTP 経路です。
 
-`/api/device/start` accepts JSON containing `remote_url` and `repository`, then returns a `device_code`, `user_code`, `verification_uri`, `expires_in`, and `interval`.
+`/api/device/start` は `remote_url` と `repository` を含む JSON を受け取り、`device_code`、`user_code`、`verification_uri`、`expires_in`、`interval` を返します。
 
-`/device` is the browser verification page.
+`/device` は browser verification page です。
 
-Approving a code requires a logged-in browser session, and approval succeeds only if that user has write access to the requested repository.
+code の承認にはログイン済み browser session が必要で、承認 user が対象 repository への write access を持つ場合だけ成功します。
 
-`/api/device/token` is the polling endpoint.
+`/api/device/token` は polling endpoint です。
 
-After approval, it returns `token_type: "lore"`, an authz `access_token`, the configured `auth_url`, and the repository `remote_url`.
+承認後は `token_type: "lore"`、authz `access_token`、設定済み `auth_url`、repository の `remote_url` を返します。
 
-Callers use those values to complete a `lore auth login --token-type lore` style login without embedding a browser in the CLI environment.
+caller はこれらの値を使い、CLI 環境に browser を埋め込まずに `lore auth login --token-type lore` 相当の login を完了します。
 
-The relevant settings are `security.device_code_ttl_seconds` and `security.device_poll_interval_seconds` in [Configuration](configuration.md#security).
+関連する設定は [Configuration](configuration.md#security) の `security.device_code_ttl_seconds` と `security.device_poll_interval_seconds` です。

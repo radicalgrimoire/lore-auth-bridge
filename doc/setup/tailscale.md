@@ -1,27 +1,25 @@
 # Tailscale
 
-[日本語](tailscale.ja.md)
+このページでは、Tailscale 越しに bridge と Lore remote を公開する場合に追加で確認する設定を扱います。
 
-This page covers the extra settings to check when exposing the bridge and Lore remote through Tailscale.
+この構成では、bridge と Lore remote を public internet に出しません。
 
-This deployment keeps the bridge and Lore remote off the public internet.
+小規模 team、固定 public IP や public DNS が不要な構成、TLS に Tailscale certificate を使いたい構成に向いています。
 
-It fits small teams, setups without fixed public IP or public DNS, and deployments that want to use Tailscale certificates for TLS.
+全体の配置判断は [Deployment](deployment.md#tailscale--vpn-mesh) を参照してください。
 
-For the broader placement decision, see [Deployment](deployment.md#tailscale--vpn-mesh).
-
-Use the MagicDNS FQDN as the stable host name.
+安定した host name として MagicDNS の FQDN を使います。
 
 ```text
 <auth-host> = <machine>.<tailnet>.ts.net
 <lore-host> = <machine>.<tailnet>.ts.net
 ```
 
-If the bridge and `loreserver` run on the same machine, these two values can be the same host.
+同じ machine で bridge と `loreserver` を動かす場合、二つの値は同じ host で構いません。
 
 ## loreserver
 
-Use the Tailscale FQDN for the gRPC auth endpoint, JWT issuer, and JWT audience.
+gRPC auth endpoint、JWT issuer、JWT audience には Tailscale FQDN を使います。
 
 ```toml
 [environment.endpoint]
@@ -35,13 +33,13 @@ jwt_audience = ["lore-service", "<machine>.<tailnet>.ts.net"]
 endpoint = "http://127.0.0.1:8080/.well-known/jwks.json"
 ```
 
-If `loreserver` runs on the same machine as the bridge, the JWKS endpoint can remain loopback.
+`loreserver` が bridge と同じ machine で動く場合、JWKS endpoint は loopback のままで構いません。
 
-If `loreserver` runs elsewhere, set `endpoint` to a bridge HTTP URL reachable from `loreserver`.
+`loreserver` を別 machine で動かす場合は、`endpoint` に `loreserver` から到達できる bridge HTTP URL を設定します。
 
 ## Bridge
 
-Use the same host names on the bridge side.
+bridge 側も同じ host name に揃えます。
 
 ```yaml
 jwt:
@@ -55,13 +53,13 @@ lore:
   default_remote_url: "lore://<machine>.<tailnet>.ts.net:41337"
 ```
 
-Restart `lore-auth-server` and `loreserver` after changing JWT, JWKS, auth endpoint, or signing key settings.
+JWT、JWKS、auth endpoint、signing key の設定を変えたら、`lore-auth-server` と `loreserver` を再起動します。
 
 ## ReBAC allowlist
 
-When `auth_url` uses a Tailscale FQDN, the bridge may see the caller as the Tailscale IP even if both processes run on the same VPS.
+`auth_url` に Tailscale FQDN を使うと、同じ VPS 内の接続でも bridge からは Tailscale IP に見える場合があります。
 
-Add the `loreserver` Tailscale IP to `security.rebac_allowed_peer_cidrs` when needed.
+必要に応じて、`security.rebac_allowed_peer_cidrs` に `loreserver` 側の Tailscale IP を追加します。
 
 ```yaml
 security:
@@ -73,7 +71,7 @@ security:
 
 ## TLS SAN
 
-The bridge gRPC TLS certificate must include the Tailscale FQDN used by `auth_url`.
+bridge gRPC TLS 証明書には、`auth_url` で使う Tailscale FQDN を含めます。
 
 ```bash
 mkcert \
@@ -85,6 +83,6 @@ mkcert \
   127.0.0.1
 ```
 
-If clients connect by IP address, the IP address must be present as an IP SAN.
+IP address で接続する client がある場合は、その IP address も IP SAN として必要です。
 
-To reduce OAuth redirect URI, JWT audience, and TLS SAN mismatches, normally use the MagicDNS FQDN consistently instead of mixing FQDN and IP address forms.
+OAuth redirect URI、JWT audience、TLS SAN の不一致を減らすため、通常は FQDN と IP address を混ぜず、MagicDNS の FQDN に統一します。

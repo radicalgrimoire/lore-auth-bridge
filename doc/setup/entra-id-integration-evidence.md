@@ -2,7 +2,10 @@
 
 この文書は、`lore-auth-bridge` を Microsoft Entra ID と連携させるために追加・修正した内容と、その必要性および検証結果を記録するものです。
 
-構築手順は [172.20.12.193: Lore と lore-auth-bridge の構築記録](on-prem-entra-lore-server.ja.md) を参照してください。
+この記録に登場する onboarding script は後に削除されました。現在の登録方法は
+[管理 Web UI](admin-ui.md) または [Authctl](authctl.md) を参照してください。
+
+構築手順は [172.20.12.193: Lore と lore-auth-bridge の構築記録](on-prem-entra-lore-server.md) を参照してください。
 
 ## 対象 commit
 
@@ -165,5 +168,4 @@ SQLite integration test は 24件成功した。ただし、今回追加した b
 - 別 user に同一 subject を bind すると拒否されること。
 - disabled user への bind を拒否すること。
 - audit INSERT が失敗した場合に identity INSERT も rollback されること。
-
 

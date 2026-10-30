@@ -1,41 +1,39 @@
 # lore-auth-bridge
 
-[日本語](README.ja.md)
+[Lore](https://lore.org/) は、Epic Games による次世代のオープンソースバージョン管理システムです。
 
-[Lore](https://lore.org/) is Epic Games' next-generation open source version control system.
+Lore サーバをチームで共有しようとすると、Lore が外部サービスに委ねている問題に突き当たります — 誰がログインでき、誰がどの repository に触れてよいのか。Lore には CLI の `lore auth login` フローと `loreserver` の JWT 検証、つまり利用する側の両端は備わっていますが、その token を**発行する側** — IdP 連携、ユーザー管理、権限管理 — は含まれていません。
 
-Sharing a Lore server with a team raises a question that Lore leaves to an external service: who may log in, and who may touch which repository. Lore ships both ends of the client side — the `lore auth login` flow in the CLI and JWT verification in `loreserver` — but nothing that issues those tokens: no identity provider integration, no user directory, no permission management.
+`lore-auth-bridge` はその隙間を埋めます。チームメンバーは普段使っている認証基盤(Google、Microsoft Entra ID、Keycloak などの OIDC IdP)でログインし、bridge が Lore の要求する token を発行します。ユーザー・グループ・repository ごとの権限は bridge で一元管理します。
 
-`lore-auth-bridge` fills that gap. Team members sign in with the identity provider you already use — Google, Microsoft Entra ID, Keycloak, or any other OIDC provider — and the bridge issues the tokens Lore expects, while you manage users, groups, and per-repository permissions in one place.
+実装は、Lore の UCS Auth / ReBAC protocol を実装する単一の Rust サービスです。OIDC ログイン、repository 単位の token exchange、JWKS 配信、repository lifecycle の同期を提供し、SQLite と ReBAC 認可エンジンの上で動作します。
 
-Under the hood, it is a single Rust service that implements Lore's UCS Auth / ReBAC protocol: OIDC login, repository-scoped token exchange, JWKS publication, and repository lifecycle synchronization, backed by SQLite and a ReBAC authorization engine.
+## radicalgrimoire が保守する Entra ID 対応
 
-## radicalgrimoire-maintained Entra ID changes
+`radicalgrimoire` の fork には、Entra ID の identity binding onboarding に関する変更が含まれます。変更範囲と根拠は [Entra ID 対応: bridge 更新履歴と根拠](doc/setup/entra-id-bridge-update-history.md)、設計判断と実機検証は [Entra ID 連携の変更根拠と検証記録](doc/setup/entra-id-integration-evidence.md) を参照してください。
 
-The `radicalgrimoire` fork includes Entra ID identity-binding onboarding changes. Their scope, rationale, and validation record are available in Japanese: [Entra ID bridge update history and rationale](doc/setup/entra-id-bridge-update-history.ja.md) and [Entra ID integration rationale and validation record](doc/setup/entra-id-integration-evidence.ja.md).
+## これは何か / どう接続するか
 
-## What Is This / How It Fits
+一言でいえば、bridge は 3 つの相手 — ログインする **Browser**、token を使う **lore CLI**、それを検証する **`loreserver`** — の間に立つ認証サービスです。
 
-In one sentence: the bridge is the auth service standing between three parties — the **browser** where people log in, the **lore CLI** that uses tokens, and **`loreserver`** that verifies them.
-
-From a user's point of view, the whole system is two steps:
+ユーザーから見ると、システム全体は次の 2 ステップです:
 
 ```text
- (1) Run lore auth login, then approve the sign-in
-     in the browser (Google or another IdP)
+ ① lore auth login を実行し、開いたブラウザで
+    IdP(Google など)のサインインを承認
       │
       ▼
- (2) Work as usual: lore clone / push
-     (tokens are obtained, exchanged, and renewed automatically
-      by the CLI and the bridge — users never handle them)
+ ② あとは普段どおり lore clone / push
+    (token の取得・交換・更新は CLI と bridge が自動で処理。
+     ユーザーが token を直接扱うことはない)
 ```
 
-The next figure is the technical view behind those steps — how the components connect through Lore's UCS Auth / ReBAC protocol. Users only ever touch steps (1)-(2) above.
+次の図は、このステップの裏側でコンポーネントが Lore の UCS Auth / ReBAC protocol を通じてどう接続されるかを示した技術要素の図です。ユーザーが直接触れるのは上の ①② だけです。
 
 ```text
- Browser ◄──── (1) OIDC login ────► IdP (Google / Entra ID / Keycloak)
+ Browser ◄──── (1) OIDC ログイン ────► IdP (Google / Entra ID / Keycloak)
     │
-    │ (2) login completes; the bridge issues an authn token
+    │ (2) ログイン完了。bridge が authn token を発行
     ▼
  ┌──────────────────────────────────────────────────┐
  │ bridge                                           │
@@ -43,51 +41,51 @@ The next figure is the technical view behind those steps — how the components 
  │   gRPC: epic_urc.UrcAuthApi, ucs.auth.RebacApi   │
  └──────────────────────────────────────────────────┘
     ▲                            ▲
-    │ (3) exchange authn token   │ (4) sync repository create/delete
-    │     for a repository-      │     (RebacApi)
-    │     scoped authz token     │ (5) fetch JWT verification keys
+    │ (3) authn token を         │ (4) repository の作成/削除を同期
+    │     repository 単位の      │     (RebacApi)
+    │     authz token に交換     │ (5) JWT 検証鍵を取得
     │     (UrcAuthApi)           │     (JWKS)
     │                            │
- lore CLI ◄─── (6) clone / push with the authz token ───► loreserver
+ lore CLI ◄── (6) authz token で clone / push ──► loreserver
 ```
 
-The user first obtains an **authn token** as proof of login.
+ユーザーはまず、ログイン済みであることを示す **authn token** を取得します。
 
-During repository operations, Lore exchanges that authn token through `UrcAuthApi` for a short-lived, repository-scoped **authz token**.
+repository 操作時、Lore はその authn token を `UrcAuthApi` で短命の repository scoped **authz token** に交換します。
 
-`loreserver` also calls `RebacApi` so the bridge learns when repositories are created or deleted.
+`loreserver` は `RebacApi` も呼び、repository の作成と削除を bridge に同期します。
 
-For the operational component list, see [Setup Guide](doc/setup-guide.md#components).
+運用上の構成要素は [Setup Guide](doc/setup-guide.md#構成要素) を参照してください。
 
-Mini glossary:
+ミニ用語集:
 
-- **UCS Auth**: Lore's authentication protocol surface, exposed here through `epic_urc.UrcAuthApi`.
-- **ReBAC**: relationship-based access control. The bridge evaluates relationships such as user -> group -> repository.
-- **authn token / authz token**: an authn token proves login to the auth service; an authz token is a short-lived repository token produced after permission evaluation.
-- **resource_id**: the Lore authorization resource identifier, in `urc-{lore_repository_id}` form. It is not the repository name.
-- **grant / role**: a grant assigns a `reader`, `writer`, or `admin` role to a user or group for one repository. This documentation uses `writer` for normal repository operations.
+- **UCS Auth**：Lore の認証 protocol surface です。この bridge では `epic_urc.UrcAuthApi` として提供します。
+- **ReBAC**：relationship-based access control です。bridge は user -> group -> repository のような関係を評価します。
+- **authn token / authz token**：authn token は auth service へのログイン証明です。authz token は permission 評価後に発行される短命の repository token です。
+- **resource_id**：Lore authorization resource identifier です。形式は `urc-{lore_repository_id}` で、repository 名ではありません。
+- **grant / role**：grant は user または group に対して、1 つの repository の `reader`、`writer`、`admin` role を割り当てます。この文書では通常の repository 操作に `writer` を使います。
 
-## Features
+## 機能
 
-- Browser login with OIDC identity providers
-- Administrative CLI for users, groups, repositories, grants, and signing keys
-- Optional [admin Web UI](doc/setup/admin-ui.md): browse and search the access model, manage grants / groups / users / repositories, test decisions with the check simulator, with every write recorded in the audit log
-- RS256 signing for authn tokens and repository-scoped authz tokens
-- Public key distribution through a JWKS endpoint
-- Token exchange and resource synchronization through Lore's UCS Auth / ReBAC protocol
+- OIDC IdP による browser login
+- 管理 CLI による user、group、repository、grant、signing key の管理
+- 任意で有効化できる[管理 Web UI](doc/setup/admin-ui.md): アクセスモデルの閲覧・検索、grant / group / user / repository の操作、check simulator による判定確認。全書き込みは監査ログに記録
+- authn token と repository scoped authz token の RS256 署名
+- JWKS endpoint による public key 配信
+- Lore の UCS Auth / ReBAC protocol による token exchange と resource sync
 
-The end-to-end path for login, repository creation, token exchange, and clone has been verified with real `lore` / `loreserver` 0.8.4+283 binaries.
+実機 `lore` / `loreserver` 0.8.4+283 で、login、repository create、token exchange、clone の通し動作を確認しています。
 
-## Start Here
+## はじめに読むもの
 
-Choose one track:
+次の 2 つの track から選びます。
 
-1. **Run it first**: use the [Hands-on Quickstart](doc/setup/hands-on-quickstart.md).
-   It is a self-contained no-IdP path that starts the bridge, `loreserver`, and the `lore` CLI.
-2. **Prepare production setup**: read the [Setup Guide](doc/setup-guide.md).
-   It starts with the component overview, then points back to the quickstart before the production configuration pages.
+1. **まず動かす**：[Hands-on Quickstart](doc/setup/hands-on-quickstart.md) を使います。
+   IdP を使わず、bridge、`loreserver`、`lore` CLI を起動する単体完結の手順です。
+2. **本番構成を整える**：[Setup Guide](doc/setup-guide.md) を読みます。
+   構成要素の概要から入り、quickstart で全体を体験してから本番向けの個別設定に進みます。
 
-Production reference pages:
+本番向けの参照ページ:
 
 - [Deployment](doc/setup/deployment.md)
 - [Configuration](doc/setup/configuration.md)
@@ -97,34 +95,32 @@ Production reference pages:
 - [Signing Keys](doc/setup/signing-keys.md)
 - [Loreserver](doc/setup/loreserver.md)
 - [Authctl](doc/setup/authctl.md)
-- [Admin Web UI](doc/setup/admin-ui.md)
+- [管理 Web UI](doc/setup/admin-ui.md)
 - [Identity Providers](doc/setup/identity-providers.md)
-  - [Google OIDC](doc/setup/google-oidc.md)
   - [Microsoft Entra ID](doc/setup/entra-id.md)
-  - [Keycloak](doc/setup/keycloak.md)
 
-## Binaries
+## 実行ファイル
 
-This repository builds three main binaries:
+この repository で使う主な実行ファイルは次の 3 つです。
 
 - `lore-auth-server`: HTTP / gRPC server
-- `lore-authctl`: administrative CLI
-- `lore-claimprobe`: CLI for validating the claim contract against the Lore binary in use
+- `lore-authctl`: 管理 CLI
+- `lore-claimprobe`: 使用中の Lore binary に対する claim contract 検証用 CLI
 
-## Requirements
+## 必要環境
 
 - Rust stable toolchain
-- `lore` / `loreserver` binaries for real integration checks
+- 実機検証時に使用する `lore` / `loreserver` binary
 
-## Getting lore and loreserver
+## lore と loreserver の入手
 
-Use `lore` and `loreserver` binaries from a Lore distribution that matches your deployment.
+運用対象の Lore deployment に合う `lore` と `loreserver` binary を使います。
 
-The Lore reference checkout documents release downloads at <https://github.com/EpicGames/lore/releases> and install scripts under `scripts/install.sh` and `scripts/install.ps1`.
+Lore の参照 checkout では、release download として <https://github.com/EpicGames/lore/releases> が案内され、install script は `scripts/install.sh` と `scripts/install.ps1` にあります。
 
-If you build Lore from source, the checked source uses a Cargo workspace.
+Lore を source から build する場合、確認した source は Cargo workspace を使います。
 
-From the Lore repository root:
+Lore repository root で次を実行します。
 
 ```bash
 cargo build --release -p lore-client --bin lore -p lore-server --bin loreserver
@@ -134,17 +130,17 @@ lore --version
 loreserver --help
 ```
 
-On Windows, the compiled binaries are `target\release\lore.exe` and `target\release\loreserver.exe`.
+Windows では、生成される binary は `target\release\lore.exe` と `target\release\loreserver.exe` です。
 
-This bridge has been verified with real `lore` / `loreserver` 0.8.4+283 binaries.
+この bridge は、実機 `lore` / `loreserver` 0.8.4+283 で検証済みです。
 
-## Installation
+## 導入
 
-For released builds, download the platform archive from the project GitHub Releases page and put `lore-auth-server`, `lore-authctl`, and `lore-claimprobe` on `PATH`.
+release build を使う場合は、project の GitHub Releases から platform archive を取得し、`lore-auth-server`、`lore-authctl`、`lore-claimprobe` を `PATH` に置きます。
 
-When working from local changes, clone this repository and build the binaries from the checkout.
+手元で変更して使う場合は、この repository を clone して次の手順で build してください。
 
-## Build
+## ビルド
 
 Unix shell:
 
@@ -166,9 +162,9 @@ cargo build --release
 .\target\release\lore-claimprobe.exe --help
 ```
 
-## Development Checks
+## 開発時の確認
 
-Use Cargo for the Rust workspace checks.
+Rust workspace の確認には Cargo を使います。
 
 ```bash
 cargo build --workspace
@@ -177,7 +173,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The Rust end-to-end harness runs only when explicitly enabled.
+Rust 製 end-to-end harness は、明示的に有効にした場合だけ実行します。
 
 ```bash
 cargo build -p lore-auth-server -p lore-authctl
@@ -187,24 +183,24 @@ LORE_E2E_AUTHCTL_BIN=target/debug/lore-authctl \
 cargo test -p lore-auth-e2e -- --test-threads=1
 ```
 
-## Configuration And Startup
+## 設定と起動
 
-An example configuration is available at [configs/lore-auth.example.yaml](configs/lore-auth.example.yaml).
+設定例は [configs/lore-auth.example.yaml](configs/lore-auth.example.yaml) にあります。
 
-The database, JWT issuer / audience, signing key, IdP settings, TLS, and `loreserver` auth configuration must be aligned.
+database、JWT issuer / audience、signing key、IdP、TLS、`loreserver` 側の auth 設定をそろえて使います。
 
-See the [Setup Guide](doc/setup-guide.md) for the full procedure.
+詳しい手順は [Setup Guide](doc/setup-guide.md) を参照してください。
 
 ```bash
 target/release/lore-authctl --config configs/lore-auth.example.yaml init-db
 target/release/lore-auth-server --config configs/lore-auth.example.yaml
 ```
 
-On Windows, use `.\target\release\lore-authctl.exe` and `.\target\release\lore-auth-server.exe`.
+Windows では `.\target\release\lore-authctl.exe` と `.\target\release\lore-auth-server.exe` を使います。
 
-## User Registration
+## ユーザー登録
 
-When IdP login is enabled, an administrator can preregister a user by provider ID and email.
+IdP login を使う場合、管理者は provider ID と email でユーザーを事前登録できます。
 
 ```bash
 PROVIDER_ID=company-sso
@@ -215,19 +211,19 @@ target/release/lore-authctl --config configs/lore-auth.example.yaml user invite 
   --name "Alice Example"
 ```
 
-See [Identity Providers](doc/setup/identity-providers.md) and [Authctl](doc/setup/authctl.md) for details.
+詳しくは [Identity Providers](doc/setup/identity-providers.md) と [Authctl](doc/setup/authctl.md) を参照してください。
 
-## Claim Contract Verification
+## claim contract の検証
 
-When pairing the bridge with a new Lore binary, use `lore-claimprobe` to validate the JWT claim contract.
+新しい Lore binary と組み合わせる場合は、`lore-claimprobe` で JWT claim contract を確認できます。
 
-## Security Notes
+## セキュリティ上の注意
 
-- Do not leave JWTs, Google client secrets, or private keys in logs or in the repository.
-- Some CLI and browser token flows display token bodies.
-  See [Operations](doc/setup/operations.md#logs) for log handling and [Operations](doc/setup/operations.md#web-token-page) for the web token page.
-- See [Signing Keys](doc/setup/signing-keys.md) for signing key and token rotation.
+- JWT、Google client secret、private key をログや repository に残さないでください。
+- CLI と browser の一部 token flow は token 本文を表示します。
+  log handling は [Operations](doc/setup/operations.md#logs)、Web token page は [Operations](doc/setup/operations.md#web-token-page) を参照してください。
+- signing key と token の rotation 手順は [Signing Keys](doc/setup/signing-keys.md) を参照してください。
 
-## License
+## ライセンス
 
 MIT License.

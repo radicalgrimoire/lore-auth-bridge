@@ -119,6 +119,9 @@ pub(crate) struct ServiceAccountAdd {
     pub(crate) client_id: String,
     #[arg(long, default_value = "")]
     pub(crate) name: String,
+    /// Existing group name or ID
+    #[arg(long)]
+    pub(crate) group: String,
 }
 
 #[derive(Debug, Args)]

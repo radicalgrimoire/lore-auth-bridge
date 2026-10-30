@@ -1,18 +1,16 @@
 # Loreserver
 
-[日本語](loreserver.ja.md)
+このページは、auth 有効化状態の `loreserver` が bridge を使うための設定です。
 
-This page describes the `loreserver` settings required to use the bridge with auth enabled.
+bridge 側の設定は [Configuration](configuration.md) を参照してください。
 
-See [Configuration](configuration.md) for bridge-side settings.
+bridge と Lore CLI を含めた全体フローの確認は [Hands-on Quickstart](hands-on-quickstart.md) を参照してください。
 
-See [Hands-on Quickstart](hands-on-quickstart.md) for the full bridge and Lore CLI flow check.
+## 設定ファイル
 
-## Config File
+Hands-on Quickstart の構成では、`LORE_CONFIG_PATH` 配下に environment 用 TOML を置きます。
 
-In the Hands-on Quickstart setup, place an environment TOML file under `LORE_CONFIG_PATH`.
-
-The example uses `.quickstart/loreconfig/e2e.toml`.
+例では `.quickstart/loreconfig/e2e.toml` を使います。
 
 ```bash
 mkdir -p .quickstart/loreconfig .quickstart/data .quickstart/home
@@ -36,9 +34,9 @@ path = "$PWD/.quickstart/data"
 EOF
 ```
 
-Some `loreserver` distributions require a base config.
+`loreserver` が base config を要求する配布形態では、Lore に同梱された `default.toml` が必要です。
 
-In that case, copy the `default.toml` bundled with Lore to `.quickstart/loreconfig/default.toml`.
+その場合は、配布物に含まれる `default.toml` を `.quickstart/loreconfig/default.toml` にコピーします。
 
 ## environment.endpoint
 
@@ -47,23 +45,23 @@ In that case, copy the `default.toml` bundled with Lore to `.quickstart/loreconf
 auth_url = "https://localhost:8081"
 ```
 
-`auth_url` is the bridge gRPC TLS endpoint.
+`auth_url` は bridge の gRPC TLS endpoint です。
 
-`loreserver` connects to `ucs.auth.RebacApi` for ReBAC sync.
+`loreserver` は ReBAC sync で `ucs.auth.RebacApi` に接続します。
 
-The `lore` CLI requests authz token exchange from `epic_urc.UrcAuthApi` during repository operations.
+`lore` CLI は repository 操作時に `epic_urc.UrcAuthApi` へ authz token exchange を要求します。
 
-A repository `admin` grant is reflected as the Lore `admin` permission in authorization tokens and permission checks. Where supported by Lore, an admin can release another user's file locks. This permission can also affect other Lore admin operations, so grant it only to trusted users or groups. Explicitly issued manual writer tokens do not include admin permission.
+repository の `admin` grant は Lore の `admin` permission として authz token と権限問い合わせに反映されます。Lore が対応している場合、admin は他の user の file lock を解除できます。これは lock 以外の Lore の admin 操作にも影響するため、grant は信頼できる user や group に限定してください。明示的に writer として手動発行した token は admin permission を含みません。
 
-Permission changes do not alter existing authorization tokens. The new permissions apply when the token expires or the repository authorization is refreshed.
+権限変更は既存の authz token には反映されません。token の期限切れ後または対象 repository の認可情報を更新した後に新しい権限が使われます。
 
-In that setup, keep this value aligned with `lore.auth_url` in the bridge config: `https://localhost:8081`.
+この構成では、bridge config の `lore.auth_url` と同じ `https://localhost:8081` に揃えます。
 
-`RebacApi` is treated as a service-to-service API dedicated to `loreserver`.
+`RebacApi` は loreserver 専用の service-to-service API として扱います。
 
-The stock `loreserver` ReBAC client does not send service token metadata, so the bridge restricts callers through a peer allowlist and network boundary.
+stock loreserver の ReBAC client は service token metadata を送らないため、bridge では peer allowlist と network boundary で caller を制限します。
 
-If the gRPC endpoint is exposed through a reverse proxy in production, restrict `/ucs.auth.RebacApi/*` at the proxy so only `loreserver` can call it.
+本番で gRPC endpoint を reverse proxy 経由で公開する場合は、proxy 側で `/ucs.auth.RebacApi/*` を loreserver からの通信だけに通してください。
 
 ## server.auth
 
@@ -73,15 +71,15 @@ jwt_issuer = "http://localhost:8080"
 jwt_audience = ["lore-service", "localhost"]
 ```
 
-`jwt_issuer` must match `jwt.issuer` in the bridge config.
+`jwt_issuer` は bridge config の `jwt.issuer` と一致させます。
 
-`jwt_audience` must be compatible with `jwt.audience` in the bridge config.
+`jwt_audience` は bridge config の `jwt.audience` と互換にします。
 
-For local use, include `lore-service` and the remote host.
+ローカルでは `lore-service` と remote host を含めます。
 
-This example uses `localhost` because the remote host is `localhost`.
+この例では remote host が `localhost` なので、`localhost` を入れています。
 
-In production, use the real Lore remote host.
+本番では実際の Lore remote host を入れます。
 
 ```toml
 [server.auth]
@@ -96,11 +94,11 @@ jwt_audience = ["lore-service", "lore.example.com"]
 endpoint = "http://localhost:8080/.well-known/jwks.json"
 ```
 
-`endpoint` is the JWKS endpoint of the bridge HTTP server.
+`endpoint` は bridge HTTP server の JWKS endpoint です。
 
-It is not the gRPC endpoint.
+gRPC endpoint ではありません。
 
-`loreserver` fetches public keys from this endpoint and verifies JWTs issued by the bridge.
+`loreserver` はここから public key を取得して、bridge が発行した JWT を検証します。
 
 ## store path
 
@@ -112,17 +110,17 @@ path = "$PWD/.quickstart/data"
 path = "$PWD/.quickstart/data"
 ```
 
-Local verification uses the same working directory for both stores.
+この例では同じ作業ディレクトリを使います。
 
-To avoid existing data, delete `.quickstart/data` and rerun the setup.
+既存データを避けたい場合は `.quickstart/data` を削除してからやり直します。
 
-## Startup
+## 起動
 
-Pass `SSL_CERT_FILE` to `loreserver` so it trusts the gRPC TLS certificate.
+`loreserver` には、gRPC TLS 証明書を信頼するための `SSL_CERT_FILE` を渡します。
 
 ```bash
 export TRUST_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
-# For a self-signed certificate:
+# 自己署名証明書を使う場合:
 # export TRUST_CERT_FILE="$PWD/.quickstart/grpc/tls.crt"
 export SSL_CERT_FILE="$TRUST_CERT_FILE"
 export LORE_CONFIG_PATH="$PWD/.quickstart/loreconfig"
@@ -132,38 +130,36 @@ export HOME="$PWD/.quickstart/home"
 loreserver
 ```
 
-`TRUST_CERT_FILE` must point to the trust anchor selected when creating the TLS certificate.
+`TRUST_CERT_FILE` には、TLS 証明書の作成時に決めた信頼 anchor を指定します。
 
-For `mkcert`, use the root CA.
+`mkcert` の場合は root CA、自己署名証明書の場合は生成した証明書です。
 
-For a self-signed certificate, use the generated certificate.
+`lore` CLI を別のターミナルで動かす場合も、同じ `LORE_CONFIG_PATH`、`LORE_ENV`、`HOME`、`SSL_CERT_FILE` を設定します。
 
-When running the `lore` CLI in another terminal, set the same `LORE_CONFIG_PATH`, `LORE_ENV`, `HOME`, and `SSL_CERT_FILE`.
+`loreserver` は起動時に bridge の JWKS endpoint から public key を取得し、設定された `jwt_issuer` と `jwt_audience` で JWT 検証を初期化します。
 
-`loreserver` fetches public keys from the bridge JWKS endpoint at startup and initializes JWT verification with the configured `jwt_issuer` and `jwt_audience`.
+bridge の `jwt.issuer`、`jwt.audience`、signing key、JWKS endpoint、または `lore.auth_url` を変更して `lore-auth-server` を再起動した場合は、`loreserver` も再起動してください。
 
-If you change the bridge `jwt.issuer`, `jwt.audience`, signing key, JWKS endpoint, or `lore.auth_url` and restart `lore-auth-server`, restart `loreserver` as well.
+## 確認点
 
-## Checks
+`loreserver` 起動時に bridge gRPC endpoint へ接続できない場合は、次を確認します。
 
-If `loreserver` cannot connect to the bridge gRPC endpoint, check the following:
+- `auth_url` が `https://localhost:8081` などの TLS endpoint になっている。
+- bridge が `server.grpc_listen` で起動している。
+- `SSL_CERT_FILE` が `loreserver` から読める証明書または CA を指している。
+- mkcert の場合は `.quickstart/grpc/tls.crt` ではなく root CA（例: `$(mkcert -CAROOT)/rootCA.pem`）を指している。
+- `SSL_CERT_FILE` を変更したら `loreserver` を再起動している。
+- `jwt_issuer` と bridge の `jwt.issuer` が一致している。
+- `jwt_audience` に remote host が含まれている。
+- `endpoint` が bridge HTTP server の JWKS endpoint を指している。
+- bridge の JWT、JWKS、auth endpoint 関連の設定を変えた後に `loreserver` を再起動している。
 
-- `auth_url` is a TLS endpoint such as `https://localhost:8081`.
-- The bridge is running on `server.grpc_listen`.
-- `SSL_CERT_FILE` points to a certificate or CA readable by `loreserver`.
-- With `mkcert`, `SSL_CERT_FILE` points to the root CA, for example `$(mkcert -CAROOT)/rootCA.pem`, not `.quickstart/grpc/tls.crt`.
-- Restart `loreserver` after changing `SSL_CERT_FILE`.
-- `jwt_issuer` matches the bridge `jwt.issuer`.
-- `jwt_audience` includes the remote host.
-- `endpoint` points to the bridge HTTP server JWKS endpoint.
-- `loreserver` was restarted after bridge JWT, JWKS, or auth endpoint settings changed.
+`lore auth login --token` は成功するのに `lore repository create` が `"Failed to connect to rebac service"` で失敗する場合、`loreserver` の ReBAC gRPC 接続が TLS 検証で落ちている可能性が高いです。
 
-If `lore auth login --token` succeeds but `lore repository create` fails with `"Failed to connect to rebac service"`, the `loreserver` ReBAC gRPC connection is probably failing TLS verification.
-
-Check that `SSL_CERT_FILE` is the correct trust anchor.
+`SSL_CERT_FILE` が正しい信頼 anchor かを次で確認してください。
 
 ```bash
 openssl verify -CAfile "$SSL_CERT_FILE" .quickstart/grpc/tls.crt
 ```
 
-If the result is not `OK`, `loreserver` cannot trust the bridge gRPC endpoint.
+`OK` にならない場合、`loreserver` は bridge gRPC endpoint を信頼できません。

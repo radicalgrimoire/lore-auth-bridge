@@ -1,122 +1,120 @@
 # Deployment
 
-[日本語](deployment.ja.md)
+このページでは、`lore-auth-bridge`、`loreserver`、任意の reverse proxy をどこに置くかを選びます。
 
-This page helps choose where to run `lore-auth-bridge`, `loreserver`, and an optional reverse proxy.
+[Configuration](configuration.md) の前に読み、port、backup、log、recovery は [Operations](operations.md) を参照します。
 
-Use it before [Configuration](configuration.md), then keep [Operations](operations.md) nearby for ports, backups, logs, and recovery.
+## 配置原則
 
-## Placement Principles
+deployment には次の process group があります。
 
-A deployment has three process groups:
+- **bridge**：HTTP listener と gRPC listener を持つ `lore-auth-server` process。
+- **loreserver**：client が clone と push で接続する Lore server process。
+- **reverse proxy**：任意。通常は Caddy、NGINX、Apache、または bridge と場合によっては `loreserver` の前に置く CDN/WAF edge。
 
-- **bridge**: one `lore-auth-server` process with an HTTP listener and a gRPC listener.
-- **loreserver**: the Lore server process that clients clone from and push to.
-- **reverse proxy**: optional, usually Caddy, NGINX, Apache, or a CDN/WAF edge in front of the bridge and sometimes `loreserver`.
+bridge と `loreserver` は同じ machine に置いても、別 machine に分けても構いません。
 
-The bridge and `loreserver` may run on the same machine or on separate machines.
+分けるかどうかは、bridge の制約ではなく、運用責任、network boundary、storage layout で決めます。
 
-Choose separation for operational ownership, network boundaries, and storage layout, not because the bridge requires it.
+bridge の data は SQLite database と signing-key directory です。
 
-Bridge data is the SQLite database plus the signing-key directory.
+どちらも block storage に支えられた local filesystem に置きます。
 
-Keep both on a local filesystem backed by block storage.
+bridge の SQLite database を S3 などの object storage や NFS に置いてはいけません。
 
-Do not put the bridge SQLite database on object storage such as S3, or on NFS.
+SQLite は filesystem locking と consistency semantics に依存しますが、object storage はそれを提供せず、network filesystem では壊れることがあります。
 
-SQLite relies on filesystem locking and consistency semantics that object storage does not provide and network filesystems can break.
+bridge の file permission と backup は [Operations](operations.md#data-layout) を参照してください。
 
-For bridge file permissions and backups, see [Operations](operations.md#data-layout).
+`loreserver` の repository data は Lore Server store settings で決まります。
 
-`loreserver` repository data is controlled by Lore Server store settings.
+Lore documentation では、`[immutable_store.local]` と `[mutable_store.local]` の path を使う direct local-store deployment が確認できます。
 
-The Lore documentation confirms a direct local-store deployment with `[immutable_store.local]` and `[mutable_store.local]` paths.
+persistent local server では、両方の store path を durable local storage に設定します。
 
-For a persistent local server, set both store paths to durable local storage.
+Lore Server config reference は、AWS 向けの `aws` mode など、plugin-backed store mode も列挙しています。
 
-The Lore Server config reference also lists plugin-backed store modes, including an AWS-oriented `aws` mode.
+Lore の AWS storage example は、immutable fragment payload に S3、fragment metadata、association、mutable data、lock に DynamoDB を使います。
 
-The Lore AWS storage example uses S3 for immutable fragment payloads and DynamoDB for fragment metadata, associations, mutable data, and locks.
-
-Plugin availability depends on the `loreserver` binary and distribution, so verify the Lore Server config reference and the binary you deploy before choosing S3 or another cloud store.
+plugin が使えるかどうかは `loreserver` binary と distribution に依存するため、S3 や別の cloud store を選ぶ前に、使う Lore Server config reference と binary を確認してください。
 
 ## Reverse Proxy
 
-A reverse proxy is recommended for production.
+本番では reverse proxy を推奨します。
 
-It gives one place to terminate public TLS, apply source restrictions and rate limits, restrict `/admin`, and host several services behind one public name.
+public TLS termination、source restriction と rate limit、`/admin` の制限、複数 service の同居を一箇所で扱えるからです。
 
-NGINX, Caddy, and Apache are equivalent choices for this role.
+NGINX、Caddy、Apache はこの用途では同等の選択肢です。
 
-Caddy is often simpler when automatic certificate management is useful.
+certificate の自動管理を楽にしたい場合は Caddy が扱いやすいことがあります。
 
-Cloudflare or another CDN/WAF can also sit in front of the reverse proxy when the deployment needs managed edge ACLs, WAF rules, or stronger public rate limiting.
+managed edge ACL、WAF rule、強い public rate limit が必要な場合は、Cloudflare などの CDN/WAF を reverse proxy の前に置けます。
 
-A minimal deployment can run without a reverse proxy.
+最小構成では reverse proxy なしでも動かせます。
 
-In that case, `/admin` is protected by OIDC login, `admin.admin_emails`, and optionally `security.admin_allowed_peer_cidrs`.
+その場合、`/admin` は OIDC login、`admin.admin_emails`、任意の `security.admin_allowed_peer_cidrs` で守ります。
 
-`RebacApi` is protected by `security.rebac_allowed_peer_cidrs`, and gRPC TLS still needs to be configured for Lore clients.
+`RebacApi` は `security.rebac_allowed_peer_cidrs` で守り、Lore client 向けの gRPC TLS も設定します。
 
-For the exact listeners and exposure guidance, see [Operations](operations.md#ports).
+正確な listener と公開方針は [Operations](operations.md#ports) を参照してください。
 
 ## Tailscale / VPN Mesh
 
-This pattern keeps the bridge and Lore remote off the public internet.
+この pattern は、bridge と Lore remote を public internet に出しません。
 
-Clients reach them through Tailscale or another private mesh network.
+client は Tailscale などの private mesh network 経由で接続します。
 
-It fits small teams, setups that do not need fixed public IP addresses or public DNS, and deployments that want to use Tailscale certificates for TLS.
+小規模 team、固定 public IP や public DNS が不要な構成、TLS に Tailscale certificate を使いたい構成に向いています。
 
-The reverse proxy can be skipped or kept as an internal edge.
+reverse proxy は省略しても、internal edge として残しても構いません。
 
-Keep bridge data and any local `loreserver` store on persistent local block storage even when the network is private.
+network が private でも、bridge data と local store mode の `loreserver` store は persistent local block storage に置きます。
 
-See [Tailscale](tailscale.md) for the concrete host, TLS, and ReBAC allowlist settings.
+具体的な host、TLS、ReBAC allowlist の設定は [Tailscale](tailscale.md) を参照してください。
 
 ## VPS / On-Prem
 
-This pattern runs the bridge, `loreserver`, and Caddy or another reverse proxy on one machine.
+この pattern は、bridge、`loreserver`、Caddy などの reverse proxy を 1 台の machine に同居させます。
 
-It is the smallest production shape for many teams.
+多くの team にとって最小の本番構成です。
 
-Use persistent local block storage for the bridge database and signing keys, and for `loreserver` local stores when local store mode is used.
+bridge database と signing key、local store mode を使う場合の `loreserver` local store は、persistent local block storage に置きます。
 
-It fits small to medium teams, deployments that value data locality or data sovereignty, and setups where predictable fixed infrastructure cost matters.
+小規模から中規模の team、data locality や data sovereignty を重視する構成、固定費の読みやすさを重視する構成に向いています。
 
-It also fits teams with high clone and pull traffic when the server is near the developers or on a network with favorable outbound transfer terms.
+server が開発者に近い場合や outbound transfer 条件がよい network を使う場合は、clone と pull の転送量が多い team にも向きます。
 
-For backup procedures, see [Operations](operations.md#backups).
+backup 手順は [Operations](operations.md#backups) を参照してください。
 
 ## Cloud
 
-This pattern runs the bridge and `loreserver` on AWS, Azure, GCP, or a similar cloud platform.
+この pattern は、bridge と `loreserver` を AWS、Azure、GCP、または同種の cloud platform で動かします。
 
-The bridge is usually a small VM because login, token signing, and ReBAC checks are lightweight.
+bridge は login、token signing、ReBAC check が軽いため、小さい VM で足ります。
 
-Place the bridge SQLite database and signing-key directory on that VM's local block storage, such as EBS, Managed Disk, or Persistent Disk.
+bridge の SQLite database と signing-key directory は、その VM の local block storage（EBS、Managed Disk、Persistent Disk など）に置きます。
 
-Do not place the bridge SQLite database on object storage or NFS.
+bridge の SQLite database を object storage や NFS に置いてはいけません。
 
-For `loreserver`, use the storage mode supported by the Lore binary you deploy.
+`loreserver` は、使用する Lore binary が対応する storage mode を使います。
 
-The confirmed local-store shape uses persistent VM block storage for `[immutable_store.local]` and `[mutable_store.local]`.
+確認できる local-store 構成では、`[immutable_store.local]` と `[mutable_store.local]` に persistent VM block storage を使います。
 
-When your Lore distribution supports the AWS storage plugin, the documented AWS shape uses S3 plus DynamoDB rather than only S3.
+使う Lore distribution が AWS storage plugin に対応する場合、documented AWS shape は S3 だけではなく S3 と DynamoDB を使います。
 
-For Azure, GCP, or another object store, follow the storage backend documentation for that Lore distribution instead of assuming S3-style settings apply.
+Azure、GCP、その他の object store では、S3 向け設定を仮定せず、その Lore distribution の storage backend documentation に従ってください。
 
-Cloud egress can dominate cost for game-asset workloads.
+game asset workload では cloud egress が支配的な cost になり得ます。
 
-Clone and pull traffic from cloud-hosted `loreserver` to developers can be much larger than the bridge traffic.
+cloud-hosted `loreserver` から開発者への clone と pull の転送量は、bridge traffic よりはるかに大きくなることがあります。
 
-Teams with heavy transfer volume should consider on-prem, VPS providers with flat or favorable outbound transfer terms, or cloud regions close to development sites.
+転送量の多い team は、オンプレ、outbound transfer が定額または有利な VPS、開発拠点に近い cloud region を検討してください。
 
-This pattern fits organizations that already operate in cloud, have distributed sites, need managed backup tooling, or want cloud-native storage and monitoring.
+この pattern は、すでに cloud 運用基盤がある組織、拠点が分散している team、managed backup tooling や cloud-native storage と monitoring を使いたい構成に向いています。
 
-## Related Pages
+## 関連ページ
 
-- [Configuration](configuration.md) for concrete bridge settings.
-- [Operations](operations.md) for ports, backups, logs, recovery, and token handling.
-- [Loreserver](loreserver.md) for bridge and `loreserver` auth integration.
-- [Tailscale](tailscale.md) for the private-mesh variant.
+- [Configuration](configuration.md)：bridge の具体的な設定。
+- [Operations](operations.md)：port、backup、log、recovery、token handling。
+- [Loreserver](loreserver.md)：bridge と `loreserver` の auth integration。
+- [Tailscale](tailscale.md)：private mesh variant。
