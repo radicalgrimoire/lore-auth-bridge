@@ -14,3 +14,5 @@
 *.sqlite3
 *.db
 /target/
+__pycache__/
+*.py[cod]
