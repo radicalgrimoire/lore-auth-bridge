@@ -87,3 +87,34 @@ bash scripts/install-bridge-ubuntu.sh \
 `--init-db` と `--init-cert` は同時に使えます。途中で失敗しても、既に配置・初期化
 されたものは自動で元には戻りません。JWT 署名鍵の生成とサービスの起動・再起動は別途行います。
 各オプションは `bash scripts/install-bridge-ubuntu.sh --help` を参照してください。
+
+### Nginx の設定
+
+Nginx と公開用 TLS 証明書を事前に用意し、bridge の HTTP / gRPC listener を
+それぞれ `127.0.0.1:18080` / `127.0.0.1:18081`（gRPC は TLS）に設定します。
+証明書の SAN と client の trust も別途確認してください。
+
+```bash
+sudo bash scripts/configure-nginx-ubuntu.sh \
+  --server-host auth.example.com \
+  --cert /etc/lore-auth/tls.crt --key /etc/lore-auth/tls.key \
+  --rebac-allow 192.0.2.10 --admin-allow 198.51.100.0/24
+if sudo systemctl is-active --quiet nginx; then
+  sudo systemctl reload nginx
+else
+  sudo systemctl start nginx
+fi
+```
+
+アドレスは環境に合わせて置き換えてください。ReBAC と `/admin` は既定で loopback のみ
+許可します。追加の IPv4 アドレスまたは CIDR は各オプションを繰り返して指定できます。
+上流 proxy を置く場合は Nginx が見る送信元を確認し、上流側でも制限してください。
+bridge の peer allowlist には Nginx の loopback を許可します。
+
+このスクリプトは既存の `lore-auth` site を上書きせず、`nginx -t` に失敗した場合は
+作成した site を削除します。サービスの起動・再読み込み、証明書の作成・更新、
+network firewall、公開 endpoint の rate limit は行いません。アクセスログは query string
+を通じた認証情報の記録を防ぐため無効化します。error log や他の proxy の log も別途
+確認してください。Nginx の設定が `sites-enabled` を include することを前提とします。
+Nginx から loopback 上の gRPC upstream への証明書検証は無効です。各オプションは
+`bash scripts/configure-nginx-ubuntu.sh --help` を参照してください。
