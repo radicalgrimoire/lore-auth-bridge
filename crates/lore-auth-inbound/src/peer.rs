@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 
+use axum::extract::connect_info::ConnectInfo;
 use http::Request;
 use tonic::Request as TonicRequest;
 use tonic::transport::server::TcpConnectInfo;
@@ -32,6 +33,20 @@ pub(crate) fn client_ip_from_grpc_request<T>(request: &TonicRequest<T>) -> Optio
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<IpAddr>().ok());
     client_ip_from_peer(peer_ip, forwarded_ip)
+}
+
+pub(crate) fn client_ip_from_http_request<B>(request: &Request<B>) -> Option<IpAddr> {
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()?
+        .0
+        .ip();
+    let forwarded_ip = request
+        .headers()
+        .get(CLIENT_IP_METADATA)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<IpAddr>().ok());
+    client_ip_from_peer(normalize_ip(peer_ip), forwarded_ip)
 }
 
 fn client_ip_from_peer(peer_ip: IpAddr, forwarded_ip: Option<IpAddr>) -> Option<IpAddr> {

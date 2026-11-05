@@ -4,8 +4,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ipnet::IpNet;
-
 use crate::{
     CoreError,
     model::{self, ExternalIdentity},
@@ -13,7 +11,7 @@ use crate::{
         AccountDirectory, BeginAuthRequest, BeginAuthResult, CompleteAuthRequest, GroupQuery,
         IdentityProvider, IdentityProviderDescriptor, IdentityProviderRegistry, StateStore,
     },
-    service::token::TokenService,
+    service::{network::require_allowed_ip, token::TokenService},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,8 +156,7 @@ impl LoginService {
         if session.status != "completed" || session.user_id.is_empty() {
             return Ok(AuthSessionTokenResult::default());
         }
-        self.require_allowed_login_ip(&session.user_id, client_ip)
-            .await?;
+        require_allowed_ip(self.groups.as_ref(), &session.user_id, client_ip, false).await?;
         let (token, user) = self.tokens.mint_authn(&session.user_id, None).await?;
         self.state.consume_auth_session(&session.id).await?;
         Ok(AuthSessionTokenResult {
@@ -167,29 +164,6 @@ impl LoginService {
             user,
             ready: true,
         })
-    }
-
-    async fn require_allowed_login_ip(
-        &self,
-        user_id: &str,
-        client_ip: Option<IpAddr>,
-    ) -> Result<(), CoreError> {
-        let cidrs = self.groups.list_user_allowed_cidrs(user_id).await?;
-        if cidrs.is_empty() {
-            return Ok(());
-        }
-        let client_ip = client_ip.ok_or(CoreError::PermissionDenied)?;
-        let allowed = cidrs.into_iter().try_fold(false, |allowed, cidr| {
-            let cidr = cidr.parse::<IpNet>().map_err(|_| {
-                CoreError::InvalidArgument("stored group CIDR is invalid".to_owned())
-            })?;
-            Ok::<_, CoreError>(allowed || cidr.contains(&client_ip))
-        })?;
-        if allowed {
-            Ok(())
-        } else {
-            Err(CoreError::PermissionDenied)
-        }
     }
 
     pub async fn complete_oauth_callback(

@@ -3,6 +3,7 @@
 
 pub mod device;
 pub mod login;
+pub mod network;
 pub mod permission;
 pub mod resource;
 pub mod token;

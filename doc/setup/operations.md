@@ -17,6 +17,41 @@ HTTP と gRPC は別 socket です。
 
 reverse proxy がどちらかの listener の前にある場合、bridge から見える immediate TCP peer は proxy です。
 
+## Token 発行元のネットワーク制限
+
+通常ユーザーには所属する全グループの CIDR を合算して OR 判定します。適用 CIDR が
+なければ制限しません。サービスアカウントには一致する CIDR が必須です。
+group と CIDR の管理は [管理 Web UI](admin-ui.md) または [Authctl](authctl.md) を使います。
+
+判定対象は interactive CLI の authn token 取得、サービスアカウント認証、browser token
+page の発行、device flow の token 取得、および authn token から authz token への交換です。
+device flow の承認ブラウザーではなく、token を取得する端末の IP を判定します。
+適用 CIDR がある場合、接続元 IP を特定できなければ拒否します。`lore-authctl token
+mint-authn` と `lore-authctl token mint` は管理用の直接発行として対象外です。
+前者の authn token の交換は判定対象ですが、後者の authz token は交換せずに利用できます。
+これらの操作ができる管理 host、database、signing key へのアクセスを制限してください。
+
+発行済み authz token の利用元は制限されず、CIDR の変更でも token は失効しません。
+この機能は Entra や他サービスへのアクセスを制限しません。
+
+推奨構成は client → Nginx → bridge です。bridge の HTTP と gRPC を loopback に bind し、
+外部から直接接続できないようにします。bridge は loopback 上の全プロセスを信頼するため、
+同一 host の信頼できない process はヘッダーを偽装できます。host access を制限してください。
+loopback からの要求では `x-lore-client-ip` を使用し、欠落や不正値は不明な IP として扱います。
+loopback 以外の直接接続ではヘッダーを無視し TCP peer を使います。
+
+Nginx は HTTP と gRPC のそれぞれで受信したヘッダーを上書きします。
+
+```nginx
+proxy_set_header x-lore-client-ip $remote_addr;
+grpc_set_header x-lore-client-ip $remote_addr;
+```
+
+それぞれ HTTP と gRPC の該当 location に設定します。既存の Nginx site は自動更新されないため、
+手動で追加して `nginx -t` を実行し、reload してください。Nginx の前に LB や別 proxy を置く場合、
+`$remote_addr` が client ではなく上流 proxy を指すことがあります。信頼する上流のみから real-IP
+情報を受け取るよう設定し、直アクセスや偽装を防いでから利用してください。
+
 ## Data Layout
 
 `database.path` は main SQLite database file を指します。

@@ -121,6 +121,7 @@ EOF
         proxy_pass http://127.0.0.1:18080;
         proxy_set_header Host $host:$server_port;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header x-lore-client-ip $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
@@ -128,6 +129,7 @@ EOF
         proxy_pass http://127.0.0.1:18080;
         proxy_set_header Host $host:$server_port;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header x-lore-client-ip $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }

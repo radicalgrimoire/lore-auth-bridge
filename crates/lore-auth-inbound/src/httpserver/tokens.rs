@@ -13,6 +13,7 @@ use axum::{
 use lore_auth_core::{
     CoreError,
     model::{self, Permission, User},
+    service::network::require_allowed_ip,
 };
 
 use super::{
@@ -21,6 +22,7 @@ use super::{
     response::{html_escape, html_response, redirect_found, response_with_headers, text_response},
     session::{current_browser_session, same_origin},
 };
+use crate::peer::client_ip_from_http_request;
 
 pub(super) async fn handle_token_page(
     State(state): State<AppState>,
@@ -81,6 +83,7 @@ pub(super) async fn handle_token_page(
 }
 
 pub(super) async fn handle_token_mint(State(state): State<AppState>, request: Request) -> Response {
+    let client_ip = client_ip_from_http_request(&request);
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
     let session = match current_browser_session(state.services.state.as_ref(), &headers).await {
@@ -109,6 +112,16 @@ pub(super) async fn handle_token_mint(State(state): State<AppState>, request: Re
     let repo = form.get("repository").cloned().unwrap_or_default();
     if repo.is_empty() {
         return text_response(StatusCode::BAD_REQUEST, "repository is required");
+    }
+    if let Err(err) = require_allowed_ip(
+        state.services.groups.as_ref(),
+        &session.user.id,
+        client_ip,
+        false,
+    )
+    .await
+    {
+        return write_token_issue_error(err);
     }
     match state
         .services

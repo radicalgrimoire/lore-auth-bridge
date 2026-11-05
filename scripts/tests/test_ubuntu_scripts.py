@@ -97,6 +97,7 @@ class UbuntuScriptsTest(unittest.TestCase):
         self.assertIn("proxy_pass http://127.0.0.1:18080;", config)
         self.assertIn("grpc_pass grpcs://127.0.0.1:18081;", config)
         self.assertIn("grpc_set_header x-lore-client-ip $remote_addr;", config)
+        self.assertEqual(config.count("proxy_set_header x-lore-client-ip $remote_addr;"), 2)
         self.assertIn("allow 198.51.100.0/24;\n        deny all;", config)
         self.assertIn("allow 192.0.2.10;\n        deny all;", config)
         self.assertEqual(config.count("access_log off;"), 2)

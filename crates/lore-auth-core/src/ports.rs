@@ -141,6 +141,8 @@ pub trait AccountDirectory: AccountQuery {
 
 #[async_trait]
 pub trait ServiceAccountDirectory: Send + Sync {
+    async fn is_service_account(&self, user_id: &str) -> Result<bool, CoreError>;
+
     async fn create_service_account(
         &self,
         input: model::CreateServiceAccountInput,

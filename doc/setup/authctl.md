@@ -241,6 +241,8 @@ lore-authctl --config "$CONFIG" check \
 ## token mint-authn
 
 IdP login を使わない場合は、authn token を手動発行します。
+この管理用の直接発行は接続元 CIDR 判定の対象外ですが、発行した authn token から
+authz token への交換は判定対象です。[Operations](operations.md#token-発行元のネットワーク制限) も参照してください。
 
 ```bash
 lore-authctl --config "$CONFIG" token mint-authn \
@@ -271,6 +273,7 @@ lore auth login \
 ## token mint
 
 repo scoped authz token を手動発行します。
+この管理用の直接発行は接続元 CIDR 判定の対象外で、発行した token は交換せずに利用できます。
 
 通常の repository 操作では、Lore CLI が `ExchangeUserTokenForMultiresourceToken` を呼んで authz token を取得します。
 

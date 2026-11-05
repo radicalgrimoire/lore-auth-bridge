@@ -11,7 +11,7 @@ use lore_auth_core::{
         TokenSigner,
     },
     service::{
-        device::{DeviceConfig, DeviceService},
+        device::{DeviceConfig, DeviceIdentityStores, DeviceService},
         login::{LoginConfig, LoginService},
         permission::PermissionService,
         resource::ResourceService,
@@ -223,7 +223,10 @@ async fn build_graph(cfg: &config::Config) -> Result<ServiceGraph> {
         device_store,
         resource_store,
         authz,
-        accounts.clone(),
+        DeviceIdentityStores {
+            accounts: accounts.clone(),
+            groups: groups.clone(),
+        },
         tokens.clone(),
         Arc::new(device::UuidDeviceCodeGenerator),
     ));

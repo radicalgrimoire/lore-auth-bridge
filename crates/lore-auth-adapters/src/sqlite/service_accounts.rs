@@ -16,6 +16,21 @@ use super::{
 
 #[async_trait]
 impl ServiceAccountDirectory for Store {
+    async fn is_service_account(&self, user_id: &str) -> CoreResult<bool> {
+        let user_id = user_id.to_owned();
+        self.conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM service_accounts WHERE user_id = ?1)",
+                    params![user_id],
+                    |row| row.get(0),
+                )
+                .map_err(core_from_sql)
+            })
+            .await
+            .map_err(core_from_driver)
+    }
+
     async fn create_service_account(
         &self,
         input: CreateServiceAccountInput,

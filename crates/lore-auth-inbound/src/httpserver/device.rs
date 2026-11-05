@@ -16,6 +16,7 @@ use super::{
     response::{html_escape, html_response, json_response, redirect_found, text_response},
     session::{current_browser_session, same_origin},
 };
+use crate::peer::client_ip_from_http_request;
 
 pub(super) async fn handle_device_page(
     State(state): State<AppState>,
@@ -157,11 +158,12 @@ pub(super) async fn handle_device_token(
             "device flow not configured",
         );
     };
+    let client_ip = client_ip_from_http_request(&request);
     let req: DeviceTokenRequest = match decode_json_body(request.into_body()).await {
         Ok(req) => req,
         Err(response) => return response,
     };
-    match device.token(&req.device_code).await {
+    match device.token(&req.device_code, client_ip).await {
         Ok(result) => json_response(
             StatusCode::OK,
             DeviceTokenResponse {

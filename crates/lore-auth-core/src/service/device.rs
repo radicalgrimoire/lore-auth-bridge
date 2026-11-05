@@ -1,4 +1,5 @@
 use std::{
+    net::IpAddr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -8,9 +9,12 @@ use crate::{
     model::{self, CreateDeviceAuthorizationInput},
     ports::{
         AccountDirectory, AuthorizationPolicy, DeviceAuthorizationStore, DeviceCodeGenerator,
-        ResourceStore,
+        GroupQuery, ResourceStore,
     },
-    service::token::{TokenService, expires_in_seconds},
+    service::{
+        network::require_allowed_ip,
+        token::{TokenService, expires_in_seconds},
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -58,8 +62,14 @@ pub struct DeviceService {
     resources: Arc<dyn ResourceStore>,
     authz: Arc<dyn AuthorizationPolicy>,
     accounts: Arc<dyn AccountDirectory>,
+    groups: Arc<dyn GroupQuery>,
     tokens: Arc<TokenService>,
     codes: Arc<dyn DeviceCodeGenerator>,
+}
+
+pub struct DeviceIdentityStores {
+    pub accounts: Arc<dyn AccountDirectory>,
+    pub groups: Arc<dyn GroupQuery>,
 }
 
 impl DeviceService {
@@ -69,7 +79,7 @@ impl DeviceService {
         devices: Arc<dyn DeviceAuthorizationStore>,
         resources: Arc<dyn ResourceStore>,
         authz: Arc<dyn AuthorizationPolicy>,
-        accounts: Arc<dyn AccountDirectory>,
+        identity: DeviceIdentityStores,
         tokens: Arc<TokenService>,
         codes: Arc<dyn DeviceCodeGenerator>,
     ) -> Self {
@@ -78,7 +88,8 @@ impl DeviceService {
             devices,
             resources,
             authz,
-            accounts,
+            accounts: identity.accounts,
+            groups: identity.groups,
             tokens,
             codes,
         }
@@ -144,7 +155,11 @@ impl DeviceService {
         })
     }
 
-    pub async fn token(&self, device_code: &str) -> Result<TokenResult, CoreError> {
+    pub async fn token(
+        &self,
+        device_code: &str,
+        client_ip: Option<IpAddr>,
+    ) -> Result<TokenResult, CoreError> {
         let device = self.device_by_device_code(device_code).await?;
         if device.expires_at <= now_unix() && device.status == "pending" {
             self.devices.expire_device_authorization(&device.id).await?;
@@ -172,6 +187,13 @@ impl DeviceService {
         if device.approved_user_id.is_empty() || device.requested_repository_id.is_empty() {
             return Err(CoreError::DeviceIncompleteAuthorization);
         }
+        require_allowed_ip(
+            self.groups.as_ref(),
+            &device.approved_user_id,
+            client_ip,
+            false,
+        )
+        .await?;
         let repo = self.repository_for_device(&device).await?;
         let signed = self
             .tokens

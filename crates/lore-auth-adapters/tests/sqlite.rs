@@ -490,6 +490,13 @@ async fn audited_sqlite_service_account_creation_is_atomic_and_does_not_log_secr
         .await
         .unwrap();
     assert_eq!(auth.id, created.account.user.id);
+    assert!(store.is_service_account(&auth.id).await.unwrap());
+    assert!(
+        !store
+            .is_service_account("not-a-service-account")
+            .await
+            .unwrap()
+    );
     assert_eq!(
         store.list_group_members(&group.id).await.unwrap()[0].id,
         auth.id

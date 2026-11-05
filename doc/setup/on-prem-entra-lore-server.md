@@ -187,6 +187,7 @@ server {
         proxy_pass http://127.0.0.1:18080;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header x-lore-client-ip $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
@@ -201,11 +202,13 @@ server {
         # ReBAC は loreserver の resource sync 専用にする。
         allow 127.0.0.1;
         deny all;
+        grpc_set_header x-lore-client-ip $remote_addr;
         grpc_pass grpcs://127.0.0.1:18081;
         grpc_ssl_verify off;
     }
 
     location / {
+        grpc_set_header x-lore-client-ip $remote_addr;
         grpc_pass grpcs://127.0.0.1:18081;
         grpc_ssl_verify off;
     }

@@ -5,7 +5,7 @@ use lore_auth_adapters::memory;
 use lore_auth_core::{
     CoreError,
     model::{self, Resource, User},
-    ports::{IssuedTokenLog, StateStore, TokenSigner},
+    ports::{GroupAdmin, IssuedTokenLog, ServiceAccountDirectory, StateStore, TokenSigner},
     service::{
         login::{LoginConfig, LoginService},
         permission::PermissionService,
@@ -18,7 +18,8 @@ use lore_auth_proto::epic_urc::{
     ExchangeExternalTokenForUserTokenRequest, ExchangeUserTokenForMultiresourceTokenRequest,
     GetAuthSessionRequest, GetProviderUserIdRequest, GetUserIdRequest, GetUserInfoRequest,
     HealthCheckRequest, LookupUserPermissionsRequest, RefreshAuthSessionRequest,
-    StartAuthSessionRequest, VerifyUserRequest, target_user, urc_auth_api_server::UrcAuthApi,
+    StartAuthSessionRequest, VerifyUserRequest, target_user, urc_auth_api_client::UrcAuthApiClient,
+    urc_auth_api_server::UrcAuthApi,
 };
 use tonic::{Code, Request};
 
@@ -236,6 +237,121 @@ async fn exchange_flow_mints_resource_token_and_lookup_permissions() {
         .expect("lookup succeeds")
         .into_inner();
     assert_eq!(lookup.resource_permission.len(), 1);
+}
+
+#[tokio::test]
+async fn exchange_enforces_client_cidrs_for_users_and_service_accounts() {
+    let (server, store, tokens) = new_test_server();
+    let user = add_alice(&store);
+    let resource = add_game_assets(&store);
+    store.grant(&user.id, &resource.resource_id);
+    let (authn, _) = tokens.mint_authn(&user.id, None).await.unwrap();
+    store.add_group("network", "").await.unwrap();
+    store.add_group_member("network", &user.id).await.unwrap();
+    store
+        .add_group_allowed_cidr("network", "192.0.2.0/24")
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(server.into_service())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    let mut client = UrcAuthApiClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let request = |token: &str, ip: Option<&str>| {
+        let mut req = auth_request(
+            ExchangeUserTokenForMultiresourceTokenRequest {
+                resource_id: vec![resource.resource_id.clone()],
+            },
+            token,
+        );
+        if let Some(ip) = ip {
+            req.metadata_mut()
+                .insert("x-lore-client-ip", ip.parse().unwrap());
+        }
+        req
+    };
+    for ip in [None, Some("bad-ip"), Some("198.51.100.5")] {
+        let err = client
+            .exchange_user_token_for_multiresource_token(request(&authn.token, ip))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied);
+    }
+    assert!(
+        client
+            .exchange_user_token_for_multiresource_token(request(&authn.token, Some("192.0.2.5")))
+            .await
+            .is_ok()
+    );
+    store
+        .remove_group_allowed_cidr("network", "192.0.2.0/24")
+        .await
+        .unwrap();
+    assert!(
+        client
+            .exchange_user_token_for_multiresource_token(request(&authn.token, None))
+            .await
+            .is_ok()
+    );
+
+    let account = store
+        .create_service_account(model::CreateServiceAccountInput {
+            client_id: "runner".into(),
+            display_name: "Runner".into(),
+        })
+        .await
+        .unwrap();
+    store.grant(&account.account.user.id, &resource.resource_id);
+    store
+        .add_group_member("network", &account.account.user.id)
+        .await
+        .unwrap();
+    let (service_token, _) = tokens
+        .mint_authn(&account.account.user.id, None)
+        .await
+        .unwrap();
+    let err = client
+        .exchange_user_token_for_multiresource_token(request(
+            &service_token.token,
+            Some("192.0.2.5"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    store
+        .add_group_allowed_cidr("network", "192.0.2.0/24")
+        .await
+        .unwrap();
+    assert!(
+        client
+            .exchange_user_token_for_multiresource_token(request(
+                &service_token.token,
+                Some("192.0.2.5")
+            ))
+            .await
+            .is_ok()
+    );
+    store
+        .remove_group_allowed_cidr("network", "192.0.2.0/24")
+        .await
+        .unwrap();
+    let err = client
+        .exchange_user_token_for_multiresource_token(request(
+            &service_token.token,
+            Some("192.0.2.5"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    task.abort();
 }
 
 #[tokio::test]

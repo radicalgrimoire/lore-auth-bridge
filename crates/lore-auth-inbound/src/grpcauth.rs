@@ -2,11 +2,13 @@
 
 use std::{net::IpAddr, sync::Arc};
 
-use ipnet::IpNet;
 use lore_auth_core::{
     model::{Permission, User, VerifiedAuthn},
     ports::{GroupQuery, ServiceAccountDirectory},
-    service::{login::LoginService, permission::PermissionService, token::TokenService},
+    service::{
+        login::LoginService, network::require_allowed_ip, permission::PermissionService,
+        token::TokenService,
+    },
 };
 use lore_auth_proto::epic_urc::{
     CheckUserPermissionRequest, CheckUserPermissionResponse, ExchangeApiKeyForUserTokenRequest,
@@ -117,24 +119,9 @@ impl UrcAuthServer {
             .authenticate_service_account(client_id, client_secret)
             .await
             .map_err(|_| Status::unauthenticated("invalid service account credentials"))?;
-        let Some(client_ip) = client_ip else {
-            return Err(Status::unauthenticated("client address unavailable"));
-        };
-        let cidrs = self
-            .groups
-            .list_user_allowed_cidrs(&user.id)
+        require_allowed_ip(self.groups.as_ref(), &user.id, client_ip, true)
             .await
             .map_err(|_| Status::unauthenticated("service account network is not allowed"))?;
-        if cidrs.is_empty()
-            || !cidrs
-                .iter()
-                .filter_map(|cidr| cidr.parse::<IpNet>().ok())
-                .any(|cidr| cidr.contains(&client_ip))
-        {
-            return Err(Status::unauthenticated(
-                "service account network is not allowed",
-            ));
-        }
         Ok(user)
     }
 }
@@ -252,6 +239,19 @@ impl UrcAuthApi for UrcAuthServer {
         request: Request<ExchangeUserTokenForMultiresourceTokenRequest>,
     ) -> Result<Response<ExchangeUserTokenForMultiresourceTokenResponse>, Status> {
         let authn = self.authn_from_request(&request).await?;
+        let require_cidr = self
+            .service_accounts
+            .is_service_account(&authn.user.id)
+            .await
+            .map_err(|_| Status::internal("failed to check account type"))?;
+        require_allowed_ip(
+            self.groups.as_ref(),
+            &authn.user.id,
+            client_ip_from_grpc_request(&request),
+            require_cidr,
+        )
+        .await
+        .map_err(resource_token_exchange_status)?;
         let req = request.into_inner();
         if req.resource_id.is_empty() {
             return Err(Status::invalid_argument("resource_id is required"));

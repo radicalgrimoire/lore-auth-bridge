@@ -18,7 +18,7 @@ use lore_auth_core::{
         ServiceAccountDirectory, StateStore,
     },
     service::{
-        device::{DeviceConfig, DeviceService},
+        device::{DeviceConfig, DeviceIdentityStores, DeviceService},
         login::{LoginConfig, LoginService},
         permission::PermissionService,
         token::{TokenConfig, TokenService},
@@ -307,6 +307,143 @@ async fn device_json_endpoints_preserve_contract_and_reject_bad_bodies() {
     assert_eq!(body.status, "authorization_pending");
     assert_eq!(body.token_type, "");
     assert_eq!(body.access_token, "");
+}
+
+#[tokio::test]
+async fn browser_and_device_token_issuance_check_the_requesting_client_ip() {
+    let (app, store, _) = new_test_app(fake_idp());
+    let user = add_alice(&store);
+    let resource = store.add_test_resource(Resource {
+        name: "game-assets".to_owned(),
+        lore_repository_id: "0194b726b34e72b0b45550b88a967076".to_owned(),
+        ..Resource::default()
+    });
+    store.grant(&user.id, &resource.resource_id);
+    for (group, cidr) in [("office", "192.0.2.0/24"), ("vpn", "2001:db8::/32")] {
+        store.add_group(group, "").await.unwrap();
+        store.add_group_member(group, &user.id).await.unwrap();
+        store.add_group_allowed_cidr(group, cidr).await.unwrap();
+    }
+    let session = store
+        .create_browser_session(&user.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session.id);
+
+    for (peer, forwarded, expected) in [
+        (
+            "127.0.0.1:1234",
+            Some("198.51.100.1"),
+            StatusCode::FORBIDDEN,
+        ),
+        ("127.0.0.1:1234", Some("not-an-ip"), StatusCode::FORBIDDEN),
+        ("127.0.0.1:1234", None, StatusCode::FORBIDDEN),
+        (
+            "198.51.100.1:1234",
+            Some("192.0.2.5"),
+            StatusCode::FORBIDDEN,
+        ),
+        ("127.0.0.1:1234", Some("192.0.2.5"), StatusCode::OK),
+        ("127.0.0.1:1234", Some("2001:db8::5"), StatusCode::OK),
+    ] {
+        let csrf = store
+            .create_csrf_token(&session.id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let mut req = post_form_request(
+            "/tokens/mint",
+            Some(cookie.clone()),
+            &format!("csrf_token={csrf}&repository=game-assets"),
+        );
+        req.headers_mut()
+            .insert(header::ORIGIN, "https://auth.example.com".parse().unwrap());
+        req.extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        if let Some(ip) = forwarded {
+            req.headers_mut()
+                .insert("x-lore-client-ip", ip.parse().unwrap());
+        }
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "peer={peer} forwarded={forwarded:?}"
+        );
+    }
+
+    let start = app
+        .clone()
+        .oneshot(json_request(
+            "/api/device/start",
+            r#"{"remote_url":"lore://example","repository":"game-assets"}"#,
+        ))
+        .await
+        .unwrap();
+    let start: DeviceStart = decode_json(start).await;
+    let csrf = store
+        .create_csrf_token(&session.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let mut approve = post_form_request(
+        "/device/approve",
+        Some(cookie),
+        &format!("csrf_token={csrf}&user_code={}", start.user_code),
+    );
+    approve
+        .headers_mut()
+        .insert(header::ORIGIN, "https://auth.example.com".parse().unwrap());
+    approve.extensions_mut().insert(ConnectInfo(
+        "198.51.100.1:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    assert_eq!(
+        app.clone().oneshot(approve).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    for (forwarded, expected) in [
+        (None, StatusCode::FORBIDDEN),
+        (Some("198.51.100.1"), StatusCode::FORBIDDEN),
+        (Some("192.0.2.5"), StatusCode::OK),
+    ] {
+        let mut req = json_request(
+            "/api/device/token",
+            &format!(r#"{{"device_code":"{}"}}"#, start.device_code),
+        );
+        req.extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        if let Some(ip) = forwarded {
+            req.headers_mut()
+                .insert("x-lore-client-ip", ip.parse().unwrap());
+        }
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), expected, "forwarded={forwarded:?}");
+        if expected == StatusCode::OK {
+            let token: DeviceToken = decode_json(response).await;
+            assert_eq!(token.status, "ok");
+            assert!(!token.access_token.is_empty());
+        }
+    }
+
+    store
+        .remove_group_allowed_cidr("office", "192.0.2.0/24")
+        .await
+        .unwrap();
+    store
+        .remove_group_allowed_cidr("vpn", "2001:db8::/32")
+        .await
+        .unwrap();
+    let csrf = store
+        .create_csrf_token(&session.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let mut req = post_form_request(
+        "/tokens/mint",
+        Some(format!("{SESSION_COOKIE_NAME}={}", session.id)),
+        &format!("csrf_token={csrf}&repository=game-assets"),
+    );
+    req.headers_mut()
+        .insert(header::ORIGIN, "https://auth.example.com".parse().unwrap());
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -4412,7 +4549,10 @@ fn new_test_app_with_admin_audit(
         store.clone(),
         store.clone(),
         store.clone(),
-        store.clone(),
+        DeviceIdentityStores {
+            accounts: store.clone(),
+            groups: store.clone(),
+        },
         tokens.clone(),
         Arc::new(lore_auth_adapters::device::UuidDeviceCodeGenerator),
     ));

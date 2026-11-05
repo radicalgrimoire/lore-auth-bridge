@@ -9,6 +9,10 @@ use super::{ServiceAccountCredential, State, Store, hash_secret, random_secret};
 
 #[async_trait]
 impl ServiceAccountDirectory for Store {
+    async fn is_service_account(&self, user_id: &str) -> Result<bool, CoreError> {
+        Ok(self.lock().service_accounts.contains_key(user_id))
+    }
+
     async fn create_service_account(
         &self,
         input: CreateServiceAccountInput,

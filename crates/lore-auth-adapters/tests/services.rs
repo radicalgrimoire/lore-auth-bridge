@@ -25,7 +25,7 @@ use lore_auth_core::{
         TokenSigner,
     },
     service::{
-        device::{DeviceConfig, DeviceService},
+        device::{DeviceConfig, DeviceIdentityStores, DeviceService},
         login::{LoginConfig, LoginService},
         permission::PermissionService,
         resource::ResourceService,
@@ -227,7 +227,10 @@ async fn admin_permissions_are_checked_per_resource_and_errors_fail_closed() {
         store.clone(),
         store.clone(),
         store.clone(),
-        store.clone(),
+        DeviceIdentityStores {
+            accounts: store.clone(),
+            groups: store.clone(),
+        },
         service.clone(),
         Arc::new(fixed_codes("admin-device", "ADMIN-001")),
     );
@@ -241,7 +244,7 @@ async fn admin_permissions_are_checked_per_resource_and_errors_fail_closed() {
         .expect("approve");
     assert_eq!(
         device
-            .token(&started.device_code)
+            .token(&started.device_code, None)
             .await
             .expect("token")
             .status,
@@ -793,7 +796,10 @@ async fn device_service_runs_start_preview_approve_token_and_consumes_authorizat
     assert_eq!(start.user_code, "ABCD-EFGH");
     assert_eq!(start.verification_uri, "https://auth.example.com/device");
 
-    let pending = service.token(&start.device_code).await.expect("pending");
+    let pending = service
+        .token(&start.device_code, None)
+        .await
+        .expect("pending");
     assert_eq!(pending.status, "authorization_pending");
 
     let preview = service.preview(&start.user_code).await.expect("preview");
@@ -810,7 +816,10 @@ async fn device_service_runs_start_preview_approve_token_and_consumes_authorizat
         .expect("approve device flow");
     assert_eq!(approved.name, "game-assets");
 
-    let token = service.token(&start.device_code).await.expect("token");
+    let token = service
+        .token(&start.device_code, None)
+        .await
+        .expect("token");
     assert_eq!(token.status, "ok");
     assert_eq!(token.token_type, "lore");
     assert!(!token.access_token.is_empty());
@@ -818,7 +827,7 @@ async fn device_service_runs_start_preview_approve_token_and_consumes_authorizat
     assert!(token.expires_in > 0 && token.expires_in <= 900);
 
     let consumed = service
-        .token(&start.device_code)
+        .token(&start.device_code, None)
         .await
         .expect("consumed status");
     assert_eq!(consumed.status, "consumed");
@@ -855,7 +864,7 @@ async fn device_service_classifies_invalid_code_and_denied_approval() {
         Err(CoreError::DeviceInvalidCode)
     ));
     assert!(matches!(
-        service.token("missing-device-code").await,
+        service.token("missing-device-code", None).await,
         Err(CoreError::DeviceInvalidCode)
     ));
 
@@ -911,7 +920,10 @@ fn device_service(store: &Arc<Store>, codes: FixedCodes) -> DeviceService {
         store.clone(),
         store.clone(),
         store.clone(),
-        store.clone(),
+        DeviceIdentityStores {
+            accounts: store.clone(),
+            groups: store.clone(),
+        },
         token_service(store),
         Arc::new(codes),
     )
