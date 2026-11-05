@@ -384,9 +384,31 @@ fn example_yaml_stays_valid() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/lore-auth.example.yaml");
 
     let cfg = config::load(path).expect("example config loads");
+    let provider = cfg
+        .identity_providers
+        .providers
+        .get("entra")
+        .expect("entra provider");
 
     assert_eq!(cfg.jwt.audience, ["lore-service", "lore.example.com"]);
-    assert_eq!(cfg.identity_providers.default.as_deref(), Some("google"));
+    assert_eq!(cfg.identity_providers.default.as_deref(), Some("entra"));
+    assert_eq!(cfg.identity_providers.providers.len(), 1);
+    assert_eq!(provider.profile, "entra");
+    assert_eq!(provider.pkce, "required");
+    assert_eq!(provider.subject.strategy, "entra_oid_tid");
+    assert_eq!(
+        provider.issuer,
+        format!(
+            "https://login.microsoftonline.com/{}/v2.0",
+            provider.subject.required_tid
+        )
+    );
+    assert_eq!(
+        provider.redirect_url,
+        format!("{}/auth/entra/callback", cfg.server.public_base_url)
+    );
+    assert_eq!(cfg.jwt.issuer, cfg.server.public_base_url);
+    assert_eq!(cfg.lore.auth_url, "https://auth.example.com:8081");
 }
 
 fn write_config(dir: &Path, raw: String) -> std::path::PathBuf {

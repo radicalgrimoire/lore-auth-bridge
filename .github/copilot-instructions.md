@@ -1,0 +1,1 @@
+- This fork is tested only with Microsoft Entra ID; other identity providers have not been tested and are not planned to be tested.

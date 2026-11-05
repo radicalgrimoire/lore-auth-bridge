@@ -3,71 +3,47 @@
 
 server:
   # This example assumes a reverse proxy or load balancer exposes
-  # https://auth.example.com and forwards to these loopback listeners.
+  # https://auth.example.com:8080 (HTTP) and :8081 (gRPC), and forwards
+  # to these loopback listeners.
   # If bridge is exposed directly, bind to a non-loopback address instead.
   # Apply rate limits for login and device-flow endpoints at the public proxy.
   # Configure proxy access logs to omit or redact query strings such as
   # OAuth code and device user_code values.
   # When exposing gRPC through a public proxy, restrict /ucs.auth.RebacApi/*
   # at the proxy so only loreserver can call ReBAC resource sync.
-  listen: "127.0.0.1:8080"
-  grpc_listen: "127.0.0.1:8081"
+  listen: "127.0.0.1:18080"
+  grpc_listen: "127.0.0.1:18081"
   # gRPC must be TLS for the lore CLI (it always dials https:// for ucs-auth).
   # Provide a cert trusted by the CLI/loreserver, or terminate TLS at a proxy.
   grpc_tls_cert_file: "/etc/lore-auth/grpc/tls.crt"
   grpc_tls_key_file: "/etc/lore-auth/grpc/tls.key"
-  public_base_url: "https://auth.example.com"
+  public_base_url: "https://auth.example.com:8080"
 
 identity_providers:
-  # Provider instance IDs are part of the bridge identity key.
-  # Use stable IDs such as google, keycloak-prod, or auth0-main.
-  default: google
+  # Provider instance IDs are part of the bridge identity key; keep this ID stable.
+  default: entra
   providers:
-    google:
+    entra:
       type: oidc
-      profile: google
-      display_name: "Google"
-      issuer: "https://accounts.google.com"
-      client_id: "xxx.apps.googleusercontent.com"
-      # Store the secret itself in this file. Do not put the secret value in YAML.
-      client_secret_file: "/etc/lore-auth/google_client_secret"
-      # Must exactly match an authorized redirect URI in the Google OAuth client.
-      redirect_url: "https://auth.example.com/auth/google/callback"
+      profile: entra
+      display_name: "Microsoft Entra ID"
+      # Replace this tenant ID in both issuer and subject.required_tid.
+      issuer: "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0"
+      client_id: "<application-client-id>"
+      # Store the secret itself in this file, not in YAML.
+      client_secret_file: "/etc/lore-auth/entra_client_secret"
+      # Must exactly match a redirect URI registered in the Entra application.
+      redirect_url: "https://auth.example.com:8080/auth/entra/callback"
       scopes:
         - openid
         - email
         - profile
+      pkce: required
       subject:
-        strategy: oidc_sub
-      # Restrict accepted Google Workspace accounts by the ID token hd claim.
+        strategy: entra_oid_tid
+        required_tid: "00000000-0000-0000-0000-000000000000"
       trust:
         email_binding: verified_email_invitation
-        hosted_domain:
-          allowed: []
-        personal_accounts: allow
-
-    # Example for a generic OIDC provider such as Keycloak.
-    # allowed_email_domains applies when a verified-email invitation is bound;
-    # it is not a global login allowlist for existing external identities.
-    # keycloak-prod:
-    #   type: oidc
-    #   profile: keycloak
-    #   display_name: "Company SSO"
-    #   issuer: "https://sso.example.com/realms/prod"
-    #   client_id: "lore-auth-bridge"
-    #   client_secret_file: "/etc/lore-auth/keycloak_client_secret"
-    #   redirect_url: "https://auth.example.com/auth/keycloak-prod/callback"
-    #   scopes:
-    #     - openid
-    #     - email
-    #     - profile
-    #   pkce: required
-    #   subject:
-    #     strategy: oidc_sub
-    #   trust:
-    #     email_binding: verified_email_invitation
-    #     allowed_email_domains:
-    #       - "example.com"
 
 database:
   path: "/var/lib/lore-auth/lore-auth.sqlite3"
@@ -79,7 +55,7 @@ authz:
   backend: rebac
 
 jwt:
-  issuer: "https://auth.example.com"
+  issuer: "https://auth.example.com:8080"
   audience:
     - "lore-service"
     - "lore.example.com"
@@ -91,7 +67,7 @@ lore:
   default_remote_url: "lore://lore.example.com:41337"
   # Auth gRPC endpoint advertised to Lore.
   # Use an HTTPS gRPC endpoint here.
-  auth_url: "https://auth.example.com"
+  auth_url: "https://auth.example.com:8081"
 
 # Admin Web UI is disabled when admin.admin_emails is omitted or empty.
 # Production deployments should still put /admin behind nginx/caddy and
