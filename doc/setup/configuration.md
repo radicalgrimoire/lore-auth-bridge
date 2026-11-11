@@ -269,6 +269,14 @@ identity_providers:
 
 OIDC 系 provider の `redirect_url` は `/auth/{provider}/callback` にします。
 
+bridge は provider ごとに IdP の署名検証用公開鍵を起動時に取得し、1 時間ごとに更新します。
+未知の鍵 ID を持つ ID token を受け取った場合も再取得し、同じ token を検証します。
+取得先は provider の discovery 情報に含まれる JWKS endpoint です。再取得は provider ごとに
+5 分間隔に制限し、失敗時も同じ制限を適用します。定期更新が制限期間と重なった場合は、
+期間の終了後に実行します。更新に失敗した場合、最後に取得した鍵を
+最大 24 時間使い、期限切れ後は更新に成功するまでログインを拒否します。署名や claim の
+検証は鍵更新後も省略しません。bridge 自身が発行する token の署名鍵とは別です。
+
 `profile: google` は Google 用の trust policy check を有効にします。
 
 `trust.hosted_domain.allowed` は、Google ID token の `hd` claim で許可する Workspace domain です。

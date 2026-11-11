@@ -2,9 +2,9 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,6 +14,7 @@ use lore_auth_core::{
     CoreError,
     ports::{BeginAuthRequest, CompleteAuthRequest, IdentityProvider},
 };
+use openidconnect::{IssuerUrl, core::CoreProviderMetadata, reqwest};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use url::{Url, form_urlencoded};
@@ -194,6 +195,438 @@ async fn complete_auth_verifies_id_token_and_maps_claims() {
     assert_eq!(identity.display_name, "Alice Example");
     assert_eq!(identity.picture_url, "https://example.com/alice.png");
     assert_eq!(identity.hosted_domain, "example.com");
+}
+
+#[tokio::test]
+async fn complete_auth_refreshes_unknown_signing_key_without_reexchanging_code() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({
+            "iss": issuer.url,
+            "aud": "client-id",
+            "sub": "subject-1",
+            "nonce": "nonce-123",
+        }),
+        "rotated-key",
+    ));
+
+    let identity = provider
+        .complete_auth(CompleteAuthRequest {
+            code: "auth-code".to_owned(),
+            nonce: "nonce-123".to_owned(),
+            ..CompleteAuthRequest::default()
+        })
+        .await
+        .expect("rotated signing key should be discovered");
+    assert_eq!(identity.subject, "subject-1");
+    let state = issuer.state.lock().expect("issuer state");
+    assert_eq!(state.jwks_requests, 2);
+    assert_eq!(state.token_requests, 1);
+}
+
+#[tokio::test]
+async fn unknown_signing_keys_are_rate_limited_and_still_require_valid_claims() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "missing-key",
+    ));
+    for _ in 0..3 {
+        assert!(matches!(
+            provider
+                .complete_auth(CompleteAuthRequest {
+                    code: "auth-code".to_owned(),
+                    ..CompleteAuthRequest::default()
+                })
+                .await,
+            Err(CoreError::Unauthenticated)
+        ));
+    }
+    assert_eq!(issuer.jwks_requests(), 2);
+
+    issuer.set_id_token(sign_id_token(json!({
+        "iss": issuer.url, "aud": "client-id", "sub": "subject-1", "nonce": "incorrect",
+    })));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                nonce: "expected".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+    assert_eq!(issuer.jwks_requests(), 2);
+}
+
+#[tokio::test]
+async fn failed_key_refresh_keeps_valid_keys_until_the_cache_expires() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.fail_jwks();
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "missing-key",
+    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            provider
+                .complete_auth(CompleteAuthRequest {
+                    code: "auth-code".to_owned(),
+                    ..CompleteAuthRequest::default()
+                })
+                .await,
+            Err(CoreError::Unauthenticated)
+        ));
+    }
+    assert_eq!(issuer.jwks_requests(), 2);
+    issuer.set_id_token(sign_id_token(json!({
+        "iss": issuer.url, "aud": "client-id", "sub": "subject-1",
+    })));
+    assert!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await
+            .is_ok()
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60 + 1)).await;
+    tokio::time::resume();
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+}
+
+#[tokio::test]
+async fn rotated_key_does_not_bypass_nonce_validation() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({
+            "iss": issuer.url, "aud": "client-id", "sub": "subject-1", "nonce": "incorrect",
+        }),
+        "rotated-key",
+    ));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                nonce: "expected".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+    assert_eq!(issuer.jwks_requests(), 2);
+}
+
+#[tokio::test]
+async fn oversized_jwks_is_rejected_without_replacing_cached_keys() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_jwks_padding(1024 * 1024 + 1);
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+    issuer.set_id_token(sign_id_token(json!({
+        "iss": issuer.url, "aud": "client-id", "sub": "subject-1",
+    })));
+    assert!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn oversized_jwks_without_content_length_is_rejected() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_jwks_padding(1024 * 1024 + 1);
+    issuer.omit_jwks_content_length();
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_unknown_keys_share_one_refresh() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    let request = CompleteAuthRequest {
+        code: "auth-code".to_owned(),
+        ..CompleteAuthRequest::default()
+    };
+    let (a, b, c) = tokio::join!(
+        provider.complete_auth(request.clone()),
+        provider.complete_auth(request.clone()),
+        provider.complete_auth(request)
+    );
+    assert!(a.is_ok() && b.is_ok() && c.is_ok());
+    assert_eq!(issuer.jwks_requests(), 2);
+}
+
+#[tokio::test]
+async fn cancelled_login_does_not_cancel_shared_key_refresh() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    issuer.set_signing_key("rotated-key");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    let gate = issuer.block_jwks();
+    let first_provider = provider.clone();
+    let first = tokio::spawn(async move {
+        first_provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while issuer.jwks_requests() < 2 {
+        assert!(Instant::now() < deadline, "key refresh did not start");
+        tokio::task::yield_now().await;
+    }
+    first.abort();
+    assert!(
+        first
+            .await
+            .expect_err("login should be cancelled")
+            .is_cancelled()
+    );
+    *gate.0.lock().expect("jwks gate") = true;
+    gate.1.notify_one();
+    assert!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await
+            .is_ok()
+    );
+    assert_eq!(issuer.jwks_requests(), 2);
+}
+
+#[test]
+fn provider_from_metadata_works_without_a_runtime_and_starts_refresh_when_used() {
+    let issuer = TestIssuer::new();
+    let client = reqwest::Client::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let metadata = runtime
+        .block_on(CoreProviderMetadata::discover_async(
+            IssuerUrl::new(issuer.url.clone()).expect("issuer URL"),
+            &client,
+        ))
+        .expect("metadata");
+    drop(runtime);
+    let provider = Provider::from_metadata(
+        Config {
+            provider_id: "keycloak-prod".to_owned(),
+            issuer: issuer.url.clone(),
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            redirect_url: "https://auth.example.com/auth/keycloak-prod/callback".to_owned(),
+            ..Config::default()
+        },
+        metadata,
+        client,
+    )
+    .expect("construction without a runtime");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        provider
+            .begin_auth(BeginAuthRequest::default())
+            .await
+            .expect("begin auth");
+        tokio::time::pause();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60 * 60 + 1)).await;
+        tokio::time::resume();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while issuer.jwks_requests() < 2 {
+            assert!(Instant::now() < deadline, "periodic refresh did not run");
+            tokio::task::yield_now().await;
+        }
+    });
+    drop(runtime);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("replacement runtime");
+    runtime.block_on(async {
+        provider
+            .begin_auth(BeginAuthRequest::default())
+            .await
+            .expect("begin auth after runtime shutdown");
+        tokio::time::pause();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2 * 60 * 60 + 2)).await;
+        tokio::time::resume();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while issuer.jwks_requests() < 3 {
+            assert!(Instant::now() < deadline, "refresh task did not restart");
+            tokio::task::yield_now().await;
+        }
+    });
+}
+
+#[tokio::test]
+async fn signing_keys_refresh_periodically_and_removed_keys_are_rejected() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    issuer.set_signing_key("rotated-key");
+    tokio::time::advance(Duration::from_secs(60 * 60 + 1)).await;
+    tokio::time::resume();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while issuer.jwks_requests() < 2 {
+        assert!(Instant::now() < deadline, "periodic refresh did not run");
+        tokio::task::yield_now().await;
+    }
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    assert!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await
+            .is_ok()
+    );
+    issuer.set_id_token(sign_id_token(json!({
+        "iss": issuer.url, "aud": "client-id", "sub": "subject-1",
+    })));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
+    assert_eq!(issuer.jwks_requests(), 2);
+}
+
+#[tokio::test]
+async fn scheduled_refresh_waits_for_on_demand_cooldown() {
+    let issuer = TestIssuer::new();
+    let provider = default_provider(&issuer, Config::default()).await;
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(59 * 60)).await;
+    tokio::time::resume();
+    issuer.set_signing_key("rotated-key");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    provider
+        .complete_auth(CompleteAuthRequest {
+            code: "auth-code".to_owned(),
+            ..CompleteAuthRequest::default()
+        })
+        .await
+        .expect("on-demand refresh");
+    assert_eq!(issuer.jwks_requests(), 2);
+    issuer.set_signing_key("replacement-key");
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(60 + 1)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(5 * 60 + 1)).await;
+    tokio::time::resume();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while issuer.jwks_requests() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "deferred periodic refresh did not run"
+        );
+        tokio::task::yield_now().await;
+    }
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "replacement-key",
+    ));
+    provider
+        .complete_auth(CompleteAuthRequest {
+            code: "auth-code".to_owned(),
+            ..CompleteAuthRequest::default()
+        })
+        .await
+        .expect("replacement key after periodic refresh");
+    issuer.set_id_token(sign_id_token_with_kid(
+        json!({"iss": issuer.url, "aud": "client-id", "sub": "subject-1"}),
+        "rotated-key",
+    ));
+    assert!(matches!(
+        provider
+            .complete_auth(CompleteAuthRequest {
+                code: "auth-code".to_owned(),
+                ..CompleteAuthRequest::default()
+            })
+            .await,
+        Err(CoreError::Unauthenticated)
+    ));
 }
 
 #[tokio::test]
@@ -545,13 +978,17 @@ async fn default_provider(issuer: &TestIssuer, override_config: Config) -> Provi
     .expect("provider")
 }
 
-fn sign_id_token(mut claims: Value) -> String {
+fn sign_id_token(claims: Value) -> String {
+    sign_id_token_with_kid(claims, "test-key")
+}
+
+fn sign_id_token_with_kid(mut claims: Value, kid: &str) -> String {
     if let Value::Object(ref mut map) = claims {
         map.entry("exp").or_insert_with(|| json!(now() + 3600));
         map.entry("iat").or_insert_with(|| json!(now() - 60));
     }
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("test-key".to_owned());
+    header.kid = Some(kid.to_owned());
     jsonwebtoken::encode(&header, &claims, &test_encoding_key()).expect("sign id token")
 }
 
@@ -576,10 +1013,33 @@ fn code_challenge_s256(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct IssuerState {
     id_token: String,
     expected_code_verifier: Option<String>,
+    signing_key: String,
+    jwks_requests: usize,
+    token_requests: usize,
+    jwks_fails: bool,
+    jwks_padding: usize,
+    jwks_without_content_length: bool,
+    jwks_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+}
+
+impl Default for IssuerState {
+    fn default() -> Self {
+        Self {
+            id_token: String::new(),
+            expected_code_verifier: None,
+            signing_key: "test-key".to_owned(),
+            jwks_requests: 0,
+            token_requests: 0,
+            jwks_fails: false,
+            jwks_padding: 0,
+            jwks_without_content_length: false,
+            jwks_gate: None,
+        }
+    }
 }
 
 struct TestIssuer {
@@ -606,6 +1066,35 @@ impl TestIssuer {
 
     fn set_id_token(&self, id_token: String) {
         self.state.lock().expect("issuer state").id_token = id_token;
+    }
+
+    fn set_signing_key(&self, kid: &str) {
+        self.state.lock().expect("issuer state").signing_key = kid.to_owned();
+    }
+
+    fn jwks_requests(&self) -> usize {
+        self.state.lock().expect("issuer state").jwks_requests
+    }
+
+    fn fail_jwks(&self) {
+        self.state.lock().expect("issuer state").jwks_fails = true;
+    }
+
+    fn set_jwks_padding(&self, bytes: usize) {
+        self.state.lock().expect("issuer state").jwks_padding = bytes;
+    }
+
+    fn omit_jwks_content_length(&self) {
+        self.state
+            .lock()
+            .expect("issuer state")
+            .jwks_without_content_length = true;
+    }
+
+    fn block_jwks(&self) -> Arc<(Mutex<bool>, Condvar)> {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        self.state.lock().expect("issuer state").jwks_gate = Some(gate.clone());
+        gate
     }
 
     fn expect_code_verifier(&self, verifier: &str) {
@@ -659,16 +1148,43 @@ fn handle_stream(mut stream: TcpStream, state: Arc<Mutex<IssuerState>>) {
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
         })),
-        "/jwks" => json_response(json!({
-            "keys": [{
-                "kty": "RSA",
-                "use": "sig",
-                "kid": "test-key",
-                "alg": "RS256",
-                "n": TEST_RSA_N,
-                "e": "AQAB"
-            }]
-        })),
+        "/jwks" => {
+            let mut state = state.lock().expect("issuer state");
+            state.jwks_requests += 1;
+            let gate = state.jwks_gate.clone();
+            let response = if state.jwks_fails {
+                empty_response(503, "Service Unavailable")
+            } else {
+                let mut body = serde_json::to_string(&json!({
+                    "keys": [{
+                        "kty": "RSA",
+                        "use": "sig",
+                        "kid": state.signing_key,
+                        "alg": "RS256",
+                        "n": TEST_RSA_N,
+                        "e": "AQAB"
+                    }]
+                }))
+                .expect("jwks JSON");
+                body.push_str(&" ".repeat(state.jwks_padding));
+                let content_length = if state.jwks_without_content_length {
+                    String::new()
+                } else {
+                    format!("Content-Length: {}\r\n", body.len())
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{content_length}Connection: close\r\n\r\n{body}"
+                )
+            };
+            drop(state);
+            if let Some(gate) = gate {
+                let mut released = gate.0.lock().expect("jwks gate");
+                while !*released {
+                    released = gate.1.wait(released).expect("jwks gate");
+                }
+            }
+            response
+        }
         "/token" => token_response(&body, &state),
         "/authorize" => empty_response(204, "No Content"),
         _ => empty_response(404, "Not Found"),
@@ -684,7 +1200,8 @@ fn token_response(body: &[u8], state: &Arc<Mutex<IssuerState>>) -> String {
     let form = form_urlencoded::parse(body)
         .into_owned()
         .collect::<BTreeMap<String, String>>();
-    let state = state.lock().expect("issuer state");
+    let mut state = state.lock().expect("issuer state");
+    state.token_requests += 1;
     if let Some(expected) = &state.expected_code_verifier
         && form.get("code_verifier") != Some(expected)
     {

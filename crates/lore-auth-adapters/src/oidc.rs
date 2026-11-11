@@ -2,7 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::LazyLock,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, LazyLock, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -16,13 +19,22 @@ use lore_auth_core::{
     },
 };
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, JsonWebKey, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
+    AsyncHttpClient, AuthorizationCode, ClientId, ClientSecret, CsrfToken, HttpRequest,
+    HttpResponse, IssuerUrl, JsonWebKey, JsonWebKeyId, JsonWebKeySetUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    core::{
+        CoreAuthenticationFlow, CoreClient, CoreIdTokenVerifier, CoreJsonWebKeySet,
+        CoreJwsSigningAlgorithm, CoreProviderMetadata,
+    },
     reqwest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard, RwLock},
+    task::JoinHandle,
+    time::Instant,
+};
 use tracing::warn;
 
 use crate::config::IdentityProviderConfig;
@@ -34,6 +46,255 @@ static DEFAULT_SCOPES: LazyLock<Vec<String>> = LazyLock::new(|| {
         "profile".to_owned(),
     ]
 });
+
+const KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const KEY_REFRESH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const KEY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const KEY_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+enum MetadataHttpError {
+    #[error("request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("metadata response exceeds the size limit")]
+    TooLarge,
+}
+
+struct BoundedMetadataClient(reqwest::Client);
+
+impl<'c> AsyncHttpClient<'c> for BoundedMetadataClient {
+    type Error = MetadataHttpError;
+    type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + 'c>>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(bounded_metadata_request(&self.0, request))
+    }
+}
+
+async fn bounded_metadata_request(
+    client: &reqwest::Client,
+    request: HttpRequest,
+) -> Result<HttpResponse, MetadataHttpError> {
+    let mut response = client.execute(request.try_into()?).await?;
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_METADATA_BYTES as u64)
+    {
+        return Err(MetadataHttpError::TooLarge);
+    }
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().clone();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > MAX_METADATA_BYTES - body.len() {
+            return Err(MetadataHttpError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let mut result = HttpResponse::new(body);
+    *result.status_mut() = status;
+    *result.version_mut() = version;
+    *result.headers_mut() = headers;
+    Ok(result)
+}
+
+struct KeySnapshot {
+    keys: CoreJsonWebKeySet,
+    verifier: CoreIdTokenVerifier<'static>,
+    fetched_at: Instant,
+}
+
+impl std::fmt::Debug for KeySnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KeySnapshot")
+            .field("key_count", &self.keys.keys().len())
+            .field("fetched_at", &self.fetched_at)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct VerifierParameters {
+    client_id: ClientId,
+    client_secret: ClientSecret,
+    issuer: IssuerUrl,
+    allowed_algorithms: Vec<CoreJwsSigningAlgorithm>,
+}
+
+impl VerifierParameters {
+    fn snapshot(&self, keys: CoreJsonWebKeySet) -> Arc<KeySnapshot> {
+        let verifier = CoreIdTokenVerifier::new_confidential_client(
+            self.client_id.clone(),
+            self.client_secret.clone(),
+            self.issuer.clone(),
+            keys.clone(),
+        )
+        .set_allowed_algs(self.allowed_algorithms.clone());
+        Arc::new(KeySnapshot {
+            keys,
+            verifier,
+            fetched_at: Instant::now(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct KeyCache {
+    provider_id: String,
+    jwks_url: JsonWebKeySetUrl,
+    http_client: reqwest::Client,
+    verifier_parameters: VerifierParameters,
+    snapshot: RwLock<Arc<KeySnapshot>>,
+    last_attempt: Arc<Mutex<Option<Instant>>>,
+    refresh_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for KeyCache {
+    fn drop(&mut self) {
+        if let Some(task) = self.refresh_task.get_mut().take() {
+            task.abort();
+        }
+    }
+}
+
+impl KeyCache {
+    fn new(
+        provider_id: String,
+        metadata: &CoreProviderMetadata,
+        http_client: reqwest::Client,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Arc<Self> {
+        let verifier_parameters = VerifierParameters {
+            client_id: ClientId::new(client_id.to_owned()),
+            client_secret: ClientSecret::new(client_secret.to_owned()),
+            issuer: metadata.issuer().clone(),
+            allowed_algorithms: metadata.id_token_signing_alg_values_supported().clone(),
+        };
+        let snapshot = verifier_parameters.snapshot(metadata.jwks().clone());
+        Arc::new(Self {
+            provider_id,
+            jwks_url: metadata.jwks_uri().clone(),
+            http_client,
+            verifier_parameters,
+            snapshot: RwLock::new(snapshot),
+            last_attempt: Arc::new(Mutex::new(None)),
+            refresh_task: Mutex::new(None),
+        })
+    }
+
+    async fn ensure_running(self: &Arc<Self>) {
+        let mut task = self.refresh_task.lock().await;
+        if task.as_ref().is_none_or(JoinHandle::is_finished) {
+            *task = Some(tokio::spawn(Self::refresh_periodically(Arc::downgrade(
+                self,
+            ))));
+        }
+    }
+
+    async fn refresh_periodically(cache: Weak<Self>) {
+        let mut interval =
+            tokio::time::interval_at(Instant::now() + KEY_REFRESH_INTERVAL, KEY_REFRESH_INTERVAL);
+        loop {
+            interval.tick().await;
+            loop {
+                let Some(cache) = cache.upgrade() else {
+                    return;
+                };
+                let retry_after = cache.refresh(None).await;
+                drop(cache);
+                let Some(delay) = retry_after else {
+                    break;
+                };
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    async fn refresh(self: &Arc<Self>, missing_key: Option<&JsonWebKeyId>) -> Option<Duration> {
+        let last_attempt = self.last_attempt.clone().lock_owned().await;
+        if let Some(key_id) = missing_key
+            && self
+                .snapshot
+                .read()
+                .await
+                .keys
+                .keys()
+                .iter()
+                .any(|key| key.key_id() == Some(key_id))
+        {
+            return None;
+        }
+        let now = Instant::now();
+        if let Some(last) = *last_attempt {
+            let elapsed = now.duration_since(last);
+            if elapsed < KEY_REFRESH_COOLDOWN {
+                return Some(KEY_REFRESH_COOLDOWN - elapsed);
+            }
+        }
+        let task = tokio::spawn(Self::perform_refresh(self.clone(), last_attempt, now));
+        if let Err(err) = task.await {
+            warn!(provider_id = %self.provider_id, error = %err, "OIDC signing key refresh task failed");
+        }
+        None
+    }
+
+    async fn perform_refresh(
+        self: Arc<Self>,
+        mut last_attempt: OwnedMutexGuard<Option<Instant>>,
+        started_at: Instant,
+    ) {
+        let client = BoundedMetadataClient(self.http_client.clone());
+        match tokio::time::timeout(
+            KEY_REFRESH_TIMEOUT,
+            CoreJsonWebKeySet::fetch_async(&self.jwks_url, &client),
+        )
+        .await
+        {
+            Ok(Ok(keys)) => {
+                *self.snapshot.write().await = self.verifier_parameters.snapshot(keys);
+            }
+            Ok(Err(err)) => {
+                warn!(provider_id = %self.provider_id, error = %err, "OIDC signing key refresh failed");
+            }
+            Err(_) => {
+                warn!(provider_id = %self.provider_id, "OIDC signing key refresh timed out");
+            }
+        }
+        *last_attempt = Some(started_at);
+    }
+
+    async fn keys_for_token(
+        self: &Arc<Self>,
+        kid: Option<&str>,
+    ) -> Result<Arc<KeySnapshot>, CoreError> {
+        let key_id = kid.map(|kid| JsonWebKeyId::new(kid.to_owned()));
+        let snapshot = self.snapshot.read().await;
+        let expired = snapshot.fetched_at.elapsed() >= KEY_CACHE_TTL;
+        let missing = key_id.as_ref().is_some_and(|key_id| {
+            !snapshot
+                .keys
+                .keys()
+                .iter()
+                .any(|key| key.key_id() == Some(key_id))
+        });
+        drop(snapshot);
+        if expired {
+            let _ = self.refresh(None).await;
+        } else if missing {
+            let _ = self.refresh(key_id.as_ref()).await;
+        }
+        let snapshot = self.snapshot.read().await;
+        if snapshot.fetched_at.elapsed() >= KEY_CACHE_TTL {
+            warn!(provider_id = %self.provider_id, "OIDC signing key cache expired");
+            return Err(CoreError::Unauthenticated);
+        }
+        Ok(snapshot.clone())
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
@@ -94,6 +355,7 @@ pub struct Provider {
     redirect_url: String,
     scopes: Vec<String>,
     provider_metadata: CoreProviderMetadata,
+    key_cache: Arc<KeyCache>,
     http_client: reqwest::Client,
     claim_mapping: BTreeMap<String, String>,
     subject_strategy: String,
@@ -115,7 +377,8 @@ impl Provider {
         let issuer_url = IssuerUrl::new(config.issuer.clone()).map_err(|err| {
             CoreError::InvalidArgument(format!("oidc: issuer is not a valid URL: {err}"))
         })?;
-        let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
+        let metadata_client = BoundedMetadataClient(http_client.clone());
+        let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &metadata_client)
             .await
             .map_err(|err| {
                 CoreError::InvalidArgument(format!(
@@ -123,9 +386,12 @@ impl Provider {
                     config.issuer
                 ))
             })?;
-        Self::from_metadata(config, provider_metadata, http_client)
+        let provider = Self::from_metadata(config, provider_metadata, http_client)?;
+        provider.key_cache.ensure_running().await;
+        Ok(provider)
     }
 
+    /// Creates a provider whose signing-key refresh task starts when it is used.
     pub fn from_metadata(
         config: Config,
         provider_metadata: CoreProviderMetadata,
@@ -135,6 +401,13 @@ impl Provider {
         // Keep the issuer exactly as advertised; Url printing would append a
         // trailing slash to bare-origin issuers and diverge from the Go form.
         let issuer = provider_metadata.issuer().as_str().to_owned();
+        let key_cache = KeyCache::new(
+            config.provider_id.clone(),
+            &provider_metadata,
+            http_client.clone(),
+            &config.client_id,
+            &config.client_secret,
+        );
         Ok(Self {
             id: config.provider_id.clone(),
             profile: config.profile,
@@ -149,6 +422,7 @@ impl Provider {
                 config.scopes
             },
             provider_metadata,
+            key_cache,
             http_client,
             claim_mapping: copy_claim_mapping(config.claim_mapping),
             subject_strategy: default_string(&config.subject_strategy, "oidc_sub"),
@@ -269,6 +543,7 @@ impl IdentityProvider for Provider {
     }
 
     async fn begin_auth(&self, req: BeginAuthRequest) -> Result<BeginAuthResult, CoreError> {
+        self.key_cache.ensure_running().await;
         let client = CoreClient::from_provider_metadata(
             self.provider_metadata.clone(),
             ClientId::new(self.client_id.clone()),
@@ -319,6 +594,7 @@ impl IdentityProvider for Provider {
     }
 
     async fn complete_auth(&self, req: CompleteAuthRequest) -> Result<ExternalIdentity, CoreError> {
+        self.key_cache.ensure_running().await;
         let client = CoreClient::from_provider_metadata(
             self.provider_metadata.clone(),
             ClientId::new(self.client_id.clone()),
@@ -344,17 +620,16 @@ impl IdentityProvider for Provider {
         })?;
         let raw_id_token = id_token.to_string();
         let token_kid = jwt_key_id(&raw_id_token);
-        let verification_key_ids = self
-            .provider_metadata
-            .jwks()
+        let snapshot = self.key_cache.keys_for_token(token_kid.as_deref()).await?;
+        let verification_key_ids = snapshot
+            .keys
             .keys()
             .iter()
             .filter_map(|key| key.key_id())
             .collect::<Vec<_>>();
-        let verifier = client.id_token_verifier();
         let expected_nonce = req.nonce.clone();
         let verified_claims = id_token
-            .claims(&verifier, |actual_nonce: Option<&Nonce>| {
+            .claims(&snapshot.verifier, |actual_nonce: Option<&Nonce>| {
                 if expected_nonce.is_empty() {
                     return Ok(());
                 }
