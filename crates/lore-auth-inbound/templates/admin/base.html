@@ -11,19 +11,16 @@
 </head>
 <body hx-boost="true">
   <header class="site-header">
-    <div class="container">
-    <nav>
-      <ul>
-        <li><a href="/admin"{% if active == "dashboard" %} aria-current="page"{% endif %}><strong>{{ self.t("admin.app.title") }}</strong></a></li>
-      </ul>
-      <ul>
-        <li><a href="/admin/repositories"{% if active == "repositories" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.repositories") }}</a></li>
-        <li><a href="/admin/users"{% if active == "users" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.users") }}</a></li>
-        <li><a href="/admin/groups"{% if active == "groups" %} aria-current="page"{% endif %}>{{ self.t("admin.nav.groups") }}</a></li>
-        <li><a href="/admin/server-settings"{% if active == "server-settings" %} aria-current="page"{% else if active == "simulator" %} aria-current="true"{% endif %}>{{ self.t("admin.nav.server_settings") }}</a></li>
-      </ul>
+    <strong class="site-title">{{ self.t("admin.app.title") }}</strong>
+    <nav class="desktop-nav" aria-label='{{ self.t("admin.nav.primary") }}'>
+      {% include "admin/navigation.html" %}
     </nav>
-    </div>
+    <details class="mobile-nav">
+      <summary>{{ self.t("admin.nav.menu") }}</summary>
+      <nav aria-label='{{ self.t("admin.nav.primary") }}'>
+        {% include "admin/navigation.html" %}
+      </nav>
+    </details>
   </header>
   <main class="container admin-main">
     {% if !flash.is_empty() %}

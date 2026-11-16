@@ -46,6 +46,14 @@ pub(super) struct CsrfForm {
 }
 
 #[derive(Deserialize)]
+pub(super) struct UserDeleteForm {
+    #[serde(default)]
+    pub(super) csrf_token: String,
+    #[serde(default)]
+    pub(super) confirm: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct GrantForm {
     #[serde(default)]
     pub(super) csrf_token: String,

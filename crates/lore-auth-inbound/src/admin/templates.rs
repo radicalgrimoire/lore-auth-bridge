@@ -113,7 +113,6 @@ pub(super) struct UsersTemplate<'a> {
     pub(super) limit: usize,
     pub(super) csrf_token: &'a str,
     pub(super) flash: &'a str,
-    pub(super) current_user_id: &'a str,
     pub(super) entra_providers: &'a [super::AdminEntraProvider],
 }
 
@@ -128,8 +127,6 @@ impl UsersTemplate<'_> {
 pub(super) struct UsersTableTemplate<'a> {
     pub(super) rows: &'a [UserRow],
     pub(super) limit: usize,
-    pub(super) csrf_token: &'a str,
-    pub(super) current_user_id: &'a str,
 }
 
 impl UsersTableTemplate<'_> {
@@ -147,9 +144,26 @@ pub(super) struct UserAccessTemplate<'a> {
     pub(super) repositories: Vec<super::users::UserRepositoryRow>,
     pub(super) csrf_token: &'a str,
     pub(super) flash: &'a str,
+    pub(super) current_user_id: &'a str,
 }
 
 impl UserAccessTemplate<'_> {
+    fn t(&self, key: &str) -> String {
+        translate(key)
+    }
+}
+
+#[derive(Template)]
+#[template(path = "admin/user_delete.html")]
+pub(super) struct UserDeleteTemplate<'a> {
+    pub(super) active: &'a str,
+    pub(super) user: UserRow,
+    pub(super) csrf_token: &'a str,
+    pub(super) flash: &'a str,
+    pub(super) deleted: bool,
+}
+
+impl UserDeleteTemplate<'_> {
     fn t(&self, key: &str) -> String {
         translate(key)
     }

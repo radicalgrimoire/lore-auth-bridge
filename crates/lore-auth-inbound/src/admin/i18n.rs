@@ -7,6 +7,7 @@ use std::{
 
 const EN_DICT_RAW: &str = include_str!("i18n/en.yaml");
 const BASE_TEMPLATE_RAW: &str = include_str!("../../templates/admin/base.html");
+const NAVIGATION_TEMPLATE_RAW: &str = include_str!("../../templates/admin/navigation.html");
 const DASHBOARD_TEMPLATE_RAW: &str = include_str!("../../templates/admin/dashboard.html");
 const REPOSITORIES_TEMPLATE_RAW: &str = include_str!("../../templates/admin/repositories.html");
 const REPOSITORIES_TABLE_TEMPLATE_RAW: &str =
@@ -14,6 +15,7 @@ const REPOSITORIES_TABLE_TEMPLATE_RAW: &str =
 const USERS_TEMPLATE_RAW: &str = include_str!("../../templates/admin/users.html");
 const USERS_TABLE_TEMPLATE_RAW: &str = include_str!("../../templates/admin/users_table.html");
 const USER_ACCESS_TEMPLATE_RAW: &str = include_str!("../../templates/admin/user_access.html");
+const USER_DELETE_TEMPLATE_RAW: &str = include_str!("../../templates/admin/user_delete.html");
 const SERVER_SETTINGS_TEMPLATE_RAW: &str =
     include_str!("../../templates/admin/server_settings.html");
 const SERVICE_ACCOUNT_CREATED_TEMPLATE_RAW: &str =
@@ -48,12 +50,14 @@ fn template_i18n_keys() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for source in [
         BASE_TEMPLATE_RAW,
+        NAVIGATION_TEMPLATE_RAW,
         DASHBOARD_TEMPLATE_RAW,
         REPOSITORIES_TEMPLATE_RAW,
         REPOSITORIES_TABLE_TEMPLATE_RAW,
         USERS_TEMPLATE_RAW,
         USERS_TABLE_TEMPLATE_RAW,
         USER_ACCESS_TEMPLATE_RAW,
+        USER_DELETE_TEMPLATE_RAW,
         SERVER_SETTINGS_TEMPLATE_RAW,
         SERVICE_ACCOUNT_CREATED_TEMPLATE_RAW,
         GROUPS_TEMPLATE_RAW,

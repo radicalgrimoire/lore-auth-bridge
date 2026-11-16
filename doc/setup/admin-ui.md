@@ -52,7 +52,7 @@ reverse proxy なしの最小構成では、admin の防御は OIDC login、`adm
 
 UI では repository、user、group、grant、user access を閲覧および検索できます。
 
-user の追加と無効化、repository の作成と認可レコードの無効化、grant 管理、group 管理ができます。
+user の追加・無効化・削除、repository の作成と認可レコードの無効化、grant 管理、group 管理ができます。
 
 repository 作成を有効にするには `lore.repository_create_url` に Lore サーバーの gRPC エンドポイントを設定します。同一ホスト上なら `http://127.0.0.1:41337` を使用できます。HTTP はループバック IP のみ使用可能で、それ以外はホストが信頼する証明書を持つ HTTPS が必要です。未設定では作成できません。Lore サーバーは `lore.repository.v1.RepositoryService` に対応し、ReBAC を通じてこの bridge にリソースを同期する必要があります。
 
@@ -65,6 +65,8 @@ Repository の View access ではユーザーとグループへの直接グラ�
 `subject.strategy: entra_oid_tid` の Entra ID provider が設定されている場合、Users 画面に「Entra ID ユーザー追加」フォームが表示されます。メール、表示名、Entra ID のオブジェクト ID を入力すると、`lore-authctl user add` と `user bind-identity --idp entra` を 1 トランザクションで実行したのと同じ結果になり、追加後すぐにサインインできます。subject は `<required_tid>:<オブジェクト ID>` として保存されます。表示名を省略するとメールを使います。
 
 user の直接追加は、ログイン binding を持たない account を作る advanced 操作です。
+
+Users の一覧から「View access」を開き、詳細画面の「Manage user」でユーザーを無効化できます。自分自身や最後の有効な管理者は無効化できません。無効化済みのユーザーとサービスアカウントは、詳細画面から確認画面に進んで完全削除できます。Entra ID 側のアカウントは削除されません。認証サーバー内の紐づけ、グループ所属、直接 grant、セッション、サービスアカウントの認証情報は削除されますが、監査記録は保持されます。発行済みトークンは即時失効しないため、削除前に期限を確認してください。
 
 Server settings では Client ID、表示名（省略時は Client ID）、既存グループを指定してサービスアカウントを作成できます。作成・グループ所属・監査記録は一括確定されます。生成された Client Secret は作成結果に一度だけ表示されるので、安全な credential store に保存してください。紛失時は `lore-authctl service-account rotate` で再発行します。このフォームでは repository grant やネットワーク CIDR を設定しません。許可 CIDR はグループの View access または `lore-authctl` で設定できます。接続元 IP が適用される許可 CIDR に一致しない場合、サービスアカウントの認証は拒否されます。
 

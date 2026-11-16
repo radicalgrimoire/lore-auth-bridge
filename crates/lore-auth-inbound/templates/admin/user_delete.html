@@ -1,0 +1,21 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ self.t("admin.user_delete.title") }}{% endblock %}
+{% block content %}
+<section>
+  <h1>{{ self.t("admin.user_delete.title") }}</h1>
+  {% if deleted %}
+  <p>{{ self.t("admin.user_delete.complete") }}</p>
+  <p><a href="/admin/users">{{ self.t("admin.user_delete.back_users") }}</a></p>
+  {% else %}
+  <p>{{ user.display_name }}{% if !user.email.is_empty() %} ({{ user.email }}){% endif %}</p>
+  <p>{{ self.t("admin.user_delete.user_id") }}: {{ user.id }}</p>
+  <p id="delete-warning">{{ self.t("admin.user_delete.warning") }} {{ self.t("admin.user_delete.tokens") }}</p>
+  <form method="post" action="/admin/users/{{ user.id_path }}/delete" hx-boost="false">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="confirm-delete"><input id="confirm-delete" type="checkbox" name="confirm" value="yes" required aria-describedby="delete-warning"> {{ self.t("admin.user_delete.confirm") }}</label>
+    <button class="danger" type="submit">{{ self.t("admin.user_delete.title") }}</button>
+  </form>
+  <p><a href="/admin/users/{{ user.id_path }}/access" hx-boost="false">{{ self.t("admin.user_delete.back_access") }}</a></p>
+  {% endif %}
+</section>
+{% endblock %}

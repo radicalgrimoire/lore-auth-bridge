@@ -830,12 +830,15 @@ async fn admin_route_renders_english_dashboard_even_with_old_language_settings()
     let body = response_text(response).await;
     assert!(body.contains("Admin Dashboard"), "{body}");
     let (navigation, _) = body.split_once("</nav>").unwrap();
-    assert!(
-        navigation.contains(
-            "<a href=\"/admin\" aria-current=\"page\"><strong>Lore Auth Admin</strong></a>"
-        )
-    );
+    assert!(navigation.contains("<strong class=\"site-title\">Lore Auth Admin</strong>"));
+    assert!(navigation.contains("<a href=\"/admin\" aria-current=\"page\">Dashboard</a>"));
     assert_eq!(navigation.matches("<a ").count(), 5);
+    assert!(body.contains("<details class=\"mobile-nav\">"));
+    assert_eq!(
+        body.matches("<a href=\"/admin\" aria-current=\"page\">Dashboard</a>")
+            .count(),
+        2
+    );
     for path in [
         "/admin/repositories",
         "/admin/users",
@@ -1764,6 +1767,7 @@ async fn admin_users_search_uses_english_and_renders_hits_and_empty_results() {
     assert!(body.contains("&#60;Root&#62; &#38; Co Artist"), "{body}");
     assert!(!body.contains("<Root> & Co Artist"), "{body}");
     assert!(body.contains("/admin/users/user%2Fa%3Fb/access"), "{body}");
+    assert!(!body.contains("/disable"), "{body}");
     assert!(body.contains("1970-01-01 00:00:42"), "{body}");
     assert!(!body.contains("bob@example.com"), "{body}");
 
@@ -2291,7 +2295,7 @@ async fn admin_simulator_is_accessible_from_server_settings() {
     assert_eq!(settings.status(), StatusCode::OK);
     let html = response_text(settings).await;
     let (navigation, content) = html.split_once("</nav>").unwrap();
-    assert!(navigation.contains("<a href=\"/admin\"><strong>Lore Auth Admin</strong></a>"));
+    assert!(navigation.contains("<a href=\"/admin\">Dashboard</a>"));
     assert_eq!(navigation.matches("<a ").count(), 5);
     assert!(!navigation.contains("href=\"/admin/server-settings/simulator\""));
     assert!(content.contains("href=\"/admin/server-settings/simulator\""));
@@ -2308,7 +2312,11 @@ async fn admin_simulator_is_accessible_from_server_settings() {
         .unwrap();
     assert_eq!(simulator.status(), StatusCode::OK);
     let html = response_text(simulator).await;
-    assert!(html.contains("href=\"/admin/server-settings\" aria-current=\"true\""));
+    assert_eq!(
+        html.matches("href=\"/admin/server-settings\" aria-current=\"true\"")
+            .count(),
+        2
+    );
     assert!(html.contains("<p><a href=\"/admin/server-settings\">Server settings</a></p>"));
     assert!(html.contains("action=\"/admin/server-settings/simulator\""));
 
@@ -2605,6 +2613,312 @@ async fn admin_user_access_renders_rebac_accessible_permissions() {
     assert!(body.contains("urc-repo-id"), "{body}");
     assert!(body.contains("read"), "{body}");
     assert!(body.contains("write"), "{body}");
+}
+
+#[tokio::test]
+async fn admin_user_disable_is_available_on_access_page_and_reports_result() {
+    let fixture = new_sqlite_admin_app().await;
+    let access_path = format!("/admin/users/{}/access", fixture.user_id);
+    let disable_path = format!("/admin/users/{}/disable", fixture.user_id);
+
+    let mut list_request = peer_request(
+        "/admin/users?q=alice",
+        Some(fixture.admin_cookie.clone()),
+        [127, 0, 0, 1],
+    );
+    list_request
+        .headers_mut()
+        .insert("hx-request", "true".parse().unwrap());
+    let list = fixture.app.clone().oneshot(list_request).await.unwrap();
+    let list = response_text(list).await;
+    assert!(list.contains(&access_path), "{list}");
+    assert!(!list.contains(&disable_path), "{list}");
+
+    let page = fixture
+        .app
+        .clone()
+        .oneshot(peer_request(
+            &access_path,
+            Some(fixture.admin_cookie.clone()),
+            [127, 0, 0, 1],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let page = response_text(page).await;
+    assert!(
+        page.contains(&format!("action=\"{disable_path}\"")),
+        "{page}"
+    );
+    assert!(page.contains("hx-confirm="), "{page}");
+    let csrf = extract_csrf(&page);
+
+    let mut request = post_form_request(
+        &disable_path,
+        Some(fixture.admin_cookie.clone()),
+        &format!("csrf_token={csrf}"),
+    );
+    request
+        .headers_mut()
+        .insert("hx-request", "true".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("hx-boosted", "true".parse().unwrap());
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_text(response).await;
+    assert!(body.contains("User Access"), "{body}");
+    assert!(body.contains("alice@example.com (disabled)"), "{body}");
+    assert!(body.contains("Saved"), "{body}");
+    assert!(
+        !body.contains(&format!("action=\"{disable_path}\"")),
+        "{body}"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .user_by_id(&fixture.user_id)
+            .await
+            .unwrap()
+            .status,
+        "disabled"
+    );
+
+    let csrf = extract_csrf(&body);
+    let missing = fixture
+        .app
+        .oneshot(post_form_request(
+            "/admin/users/missing/disable",
+            Some(fixture.admin_cookie),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_user_delete_requires_disabled_account_and_confirmation() {
+    let fixture = new_sqlite_admin_app().await;
+    let access_path = format!("/admin/users/{}/access", fixture.user_id);
+    let disable_path = format!("/admin/users/{}/disable", fixture.user_id);
+    let delete_path = format!("/admin/users/{}/delete", fixture.user_id);
+    let get_page =
+        |path: &str| peer_request(path, Some(fixture.admin_cookie.clone()), [127, 0, 0, 1]);
+
+    let unauth = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(&delete_path, None, "confirm=yes"))
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), StatusCode::NOT_FOUND);
+    let invalid_csrf = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete_path,
+            Some(fixture.admin_cookie.clone()),
+            "csrf_token=invalid&confirm=yes",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_csrf.status(), StatusCode::FORBIDDEN);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(get_page(&access_path))
+        .await
+        .unwrap();
+    assert!(!response_text(response).await.contains(&delete_path));
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(get_page(&delete_path))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(
+        body.contains("Only disabled users can be deleted"),
+        "{body}"
+    );
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete_path,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}&confirm=yes"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("Only disabled users can be deleted")
+    );
+    assert!(fixture.store.user_by_id(&fixture.user_id).await.is_ok());
+
+    let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &access_path).await;
+    fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &disable_path,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(get_page(&access_path))
+        .await
+        .unwrap();
+    assert!(response_text(response).await.contains(&delete_path));
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(get_page(&delete_path))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains("alice@example.com"), "{body}");
+    assert!(body.contains("Entra ID account is not deleted"), "{body}");
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete_path,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains("Confirm permanent deletion first"), "{body}");
+    assert!(fixture.store.user_by_id(&fixture.user_id).await.is_ok());
+
+    let csrf = extract_csrf(&body);
+    fixture.store.enable_user(&fixture.user_id).await.unwrap();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete_path,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}&confirm=yes"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("Only disabled users can be deleted")
+    );
+    assert!(fixture.store.user_by_id(&fixture.user_id).await.is_ok());
+    fixture.store.disable_user(&fixture.user_id).await.unwrap();
+    let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &delete_path).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete_path,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}&confirm=yes"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_text(response).await;
+    assert!(body.contains("The user was permanently deleted"), "{body}");
+    assert!(body.contains("href=\"/admin/users\""), "{body}");
+    assert!(matches!(
+        fixture.store.user_by_id(&fixture.user_id).await,
+        Err(CoreError::NotFound)
+    ));
+    assert!(
+        fixture
+            .store
+            .list_grants("game-assets")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let entries = fixture.store.list_admin_audit().await.unwrap();
+    assert_eq!(audit_action_counts(&entries).get("user.delete"), Some(&1));
+}
+
+#[tokio::test]
+async fn admin_can_delete_disabled_service_account() {
+    let fixture = new_sqlite_admin_app().await;
+    let account = fixture
+        .store
+        .create_service_account(model::CreateServiceAccountInput {
+            client_id: "runner".into(),
+            display_name: "Runner".into(),
+        })
+        .await
+        .unwrap();
+    let id = &account.account.user.id;
+    let access = format!("/admin/users/{id}/access");
+    let disable = format!("/admin/users/{id}/disable");
+    let delete = format!("/admin/users/{id}/delete");
+    let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &access).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &disable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains(&delete), "{body}");
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(peer_request(
+            &delete,
+            Some(fixture.admin_cookie.clone()),
+            [127, 0, 0, 1],
+        ))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains("Runner"), "{body}");
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &delete,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}&confirm=yes"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("The user was permanently deleted")
+    );
+    assert!(matches!(
+        fixture.store.user_by_id(id).await,
+        Err(CoreError::NotFound)
+    ));
+    assert!(
+        fixture
+            .store
+            .authenticate_service_account("runner", &account.client_secret)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -3312,12 +3626,32 @@ async fn admin_user_disable_refuses_self_and_preserves_last_admin() {
         .await
         .expect("session creates");
     let admin_cookie = format!("{SESSION_COOKIE_NAME}={}", session.id);
-    let csrf = admin_csrf(app.clone(), &admin_cookie, "/admin/users").await;
+    let access_path = format!("/admin/users/{}/access", admin.id);
+    let page = app
+        .clone()
+        .oneshot(peer_request(
+            &access_path,
+            Some(admin_cookie.clone()),
+            [127, 0, 0, 1],
+        ))
+        .await
+        .unwrap();
+    let page = response_text(page).await;
+    assert!(
+        !page.contains(&format!("/admin/users/{}/disable", admin.id)),
+        "{page}"
+    );
+    assert!(
+        !page.contains(&format!("/admin/users/{}/delete", admin.id)),
+        "{page}"
+    );
+    let csrf = extract_csrf(&page);
 
     let response = app
+        .clone()
         .oneshot(post_form_request(
             &format!("/admin/users/{}/disable", admin.id),
-            Some(admin_cookie),
+            Some(admin_cookie.clone()),
             &format!("csrf_token={csrf}"),
         ))
         .await
@@ -3326,6 +3660,25 @@ async fn admin_user_disable_refuses_self_and_preserves_last_admin() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_text(response).await;
     assert!(body.contains("Error"), "{body}");
+    assert!(body.contains("User Access"), "{body}");
+    assert!(
+        body.contains("cannot disable the current admin session user"),
+        "{body}"
+    );
+    let csrf = extract_csrf(&body);
+    let response = app
+        .oneshot(post_form_request(
+            &format!("/admin/users/{}/delete", admin.id),
+            Some(admin_cookie),
+            &format!("csrf_token={csrf}&confirm=yes"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("The current admin cannot be deleted")
+    );
     let admin_after = store.user_by_id(&admin.id).await.expect("admin remains");
     assert_eq!(admin_after.status, "active");
     assert!(store.admin_audit_entries().is_empty());
@@ -4754,7 +5107,7 @@ async fn decode_json<T: for<'de> Deserialize<'de>>(response: axum::response::Res
 }
 
 async fn response_text(response: axum::response::Response) -> String {
-    let body = to_bytes(response.into_body(), 64 * 1024)
+    let body = to_bytes(response.into_body(), 128 * 1024)
         .await
         .expect("body bytes");
     String::from_utf8(body.to_vec()).expect("utf8 body")

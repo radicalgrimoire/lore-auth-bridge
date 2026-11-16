@@ -13,12 +13,12 @@ use lore_auth_core::{CoreError, model};
 use crate::httpserver::{self, AppState};
 
 use super::forms::{
-    CsrfForm, EntraIdentityUpdateForm, SearchQuery, UserAddEntraForm, UserAddForm,
+    CsrfForm, EntraIdentityUpdateForm, SearchQuery, UserAddEntraForm, UserAddForm, UserDeleteForm,
     UserDisplayNameForm,
 };
 use super::guard::{admin_actor, create_admin_csrf, require_admin, require_admin_csrf};
 use super::i18n::translate;
-use super::templates::{UserAccessTemplate, UsersTableTemplate, UsersTemplate};
+use super::templates::{UserAccessTemplate, UserDeleteTemplate, UsersTableTemplate, UsersTemplate};
 use super::{
     ADMIN_LIST_LIMIT, encode_path_segment, format_unix, is_hx_target, normalized_query, not_found,
     render_template, text_response,
@@ -47,8 +47,6 @@ pub(super) async fn handle_users(
         return render_template(UsersTableTemplate {
             rows: &rows,
             limit: ADMIN_LIST_LIMIT,
-            csrf_token: &csrf_token,
-            current_user_id: &session.user.id,
         });
     }
     render_template(UsersTemplate {
@@ -58,7 +56,6 @@ pub(super) async fn handle_users(
         limit: ADMIN_LIST_LIMIT,
         csrf_token: &csrf_token,
         flash: "",
-        current_user_id: &session.user.id,
         entra_providers: &state.cfg.admin.entra_providers,
     })
 }
@@ -322,6 +319,7 @@ async fn render_user_access(
         repositories,
         csrf_token: &csrf_token,
         flash,
+        current_user_id: &session.user.id,
     })
 }
 
@@ -559,14 +557,12 @@ pub(super) async fn handle_user_disable(
     }
     let target = match state.services.accounts.user_by_id(&id).await {
         Ok(user) => user,
-        Err(err) => {
-            let flash = format!("{}: {err}", translate("admin.flash.error"));
-            return render_users_page(&state, &session, "", &flash).await;
-        }
+        Err(CoreError::NotFound) => return not_found(),
+        Err(_) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "users unavailable"),
     };
     if let Err(err) = validate_admin_disable_target(&state, &session, &target).await {
         let flash = format!("{}: {err}", translate("admin.flash.error"));
-        return render_users_page(&state, &session, "", &flash).await;
+        return render_user_access(&state, &session, &id, &flash).await;
     }
     let writes = state
         .services
@@ -576,7 +572,107 @@ pub(super) async fn handle_user_disable(
         Ok(()) => translate("admin.flash.saved"),
         Err(err) => format!("{}: {err}", translate("admin.flash.error")),
     };
-    render_users_page(&state, &session, "", &flash).await
+    render_user_access(&state, &session, &id, &flash).await
+}
+
+pub(super) async fn handle_user_delete_confirmation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> Response {
+    let session = match require_admin(&state, &headers, peer).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    render_user_delete(&state, &session, &id, "").await
+}
+
+pub(super) async fn handle_user_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Form(form): Form<UserDeleteForm>,
+) -> Response {
+    let session = match require_admin(&state, &headers, peer).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_admin_csrf(&state, &session, &form.csrf_token).await {
+        return response;
+    }
+    if id == session.user.id {
+        return render_user_access(&state, &session, &id, &translate("admin.user_delete.self"))
+            .await;
+    }
+    if form.confirm != "yes" {
+        return render_user_delete(
+            &state,
+            &session,
+            &id,
+            &translate("admin.user_delete.must_confirm"),
+        )
+        .await;
+    }
+    let target = match state.services.accounts.user_by_id(&id).await {
+        Ok(user) => user,
+        Err(CoreError::NotFound) => return not_found(),
+        Err(_) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "users unavailable"),
+    };
+    let result = state
+        .services
+        .admin_writes
+        .for_actor(&admin_actor(&session))
+        .accounts
+        .delete_disabled_user(&id)
+        .await;
+    match result {
+        Ok(()) => render_template(UserDeleteTemplate {
+            active: "users",
+            user: UserRow::from(target),
+            csrf_token: "",
+            flash: "",
+            deleted: true,
+        }),
+        Err(CoreError::NotFound) => not_found(),
+        Err(err) => {
+            let flash = format!("{}: {err}", translate("admin.flash.error"));
+            render_user_delete(&state, &session, &id, &flash).await
+        }
+    }
+}
+
+async fn render_user_delete(
+    state: &AppState,
+    session: &httpserver::BrowserSession,
+    id: &str,
+    flash: &str,
+) -> Response {
+    let user = match state.services.accounts.user_by_id(id).await {
+        Ok(user) => user,
+        Err(CoreError::NotFound) => return not_found(),
+        Err(_) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "users unavailable"),
+    };
+    if user.id == session.user.id || user.status != "disabled" {
+        let message = if user.id == session.user.id {
+            translate("admin.user_delete.self")
+        } else {
+            translate("admin.user_delete.disabled_only")
+        };
+        return render_user_access(state, session, id, &message).await;
+    }
+    let csrf_token = match create_admin_csrf(state, session).await {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    render_template(UserDeleteTemplate {
+        active: "users",
+        user: UserRow::from(user),
+        csrf_token: &csrf_token,
+        flash,
+        deleted: false,
+    })
 }
 
 pub(super) struct UserRow {
@@ -623,7 +719,6 @@ async fn render_users_page(
         limit: ADMIN_LIST_LIMIT,
         csrf_token: &csrf_token,
         flash,
-        current_user_id: &session.user.id,
         entra_providers: &state.cfg.admin.entra_providers,
     })
 }

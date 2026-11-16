@@ -137,6 +137,12 @@ pub trait AccountDirectory: AccountQuery {
     async fn disable_user(&self, user_id_or_email: &str) -> Result<(), CoreError>;
 
     async fn enable_user(&self, user_id_or_email: &str) -> Result<(), CoreError>;
+
+    /// Permanently removes a disabled user and associated account data.
+    /// Use the actor-scoped admin write port so deletion is audited atomically.
+    async fn delete_disabled_user(&self, _user_id: &str) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported)
+    }
 }
 
 #[async_trait]

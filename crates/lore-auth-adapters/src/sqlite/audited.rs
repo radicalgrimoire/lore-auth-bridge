@@ -779,6 +779,49 @@ impl AccountDirectory for AuditedStore {
             .await
             .map_err(core_from_driver)
     }
+
+    async fn delete_disabled_user(&self, user_id: &str) -> CoreResult<()> {
+        let actor = self.actor.clone();
+        let user_id = user_id.to_owned();
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(core_from_sql)?;
+                let user = user_by_id_conn(&tx, &user_id)?;
+                if user.status != "disabled" {
+                    return Err(CoreError::InvalidArgument(
+                        "user must be disabled before deletion".into(),
+                    ));
+                }
+                for sql in [
+                    "DELETE FROM grants WHERE subject_type = 'user' AND subject_id = ?1",
+                    "DELETE FROM auth_sessions WHERE user_id = ?1",
+                    "DELETE FROM device_authorizations WHERE approved_user_id = ?1",
+                    "DELETE FROM issued_tokens WHERE user_id = ?1 OR service_account_id = ?1",
+                    "UPDATE audit_events SET actor_user_id = NULL WHERE actor_user_id = ?1",
+                    "DELETE FROM users WHERE id = ?1",
+                ] {
+                    tx.execute(sql, params![user_id]).map_err(core_from_sql)?;
+                }
+                insert_admin_audit_conn(
+                    &tx,
+                    admin_audit_entry(
+                        &actor,
+                        "user.delete",
+                        "user",
+                        user.id,
+                        format!("email={}", user.email),
+                    ),
+                )
+                .map_err(admin_audit_failed)?;
+                tx.commit().map_err(core_from_sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(core_from_driver)
+    }
 }
 
 impl AuditedStore {

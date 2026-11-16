@@ -85,4 +85,21 @@
   </form>
   {% endif %}
 </section>
+{% if user.id != current_user_id && user.status == "active" %}
+<section>
+  <h2 id="manage-user">{{ self.t("admin.user_access.manage_user") }}</h2>
+  <p>{{ self.t("admin.user_access.disable_help") }}</p>
+  <form method="post" action="/admin/users/{{ user.id_path }}/disable" aria-labelledby="manage-user" hx-confirm='{{ self.t("admin.user_access.disable_confirm") }}'>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="danger" type="submit">{{ self.t("admin.user_access.disable") }}</button>
+  </form>
+</section>
+{% else if user.id != current_user_id && user.status == "disabled" %}
+<section>
+  <h2 id="manage-user">{{ self.t("admin.user_access.manage_user") }}</h2>
+  <form method="get" action="/admin/users/{{ user.id_path }}/delete" aria-labelledby="manage-user" hx-boost="false">
+    <button class="danger" type="submit">{{ self.t("admin.user_delete.title") }}</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

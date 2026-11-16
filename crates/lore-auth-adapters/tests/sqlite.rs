@@ -1387,6 +1387,169 @@ async fn browser_session_returns_not_found_after_user_is_disabled() {
 }
 
 #[tokio::test]
+async fn user_deletion_cleans_account_data_and_rolls_back_if_audit_fails() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let input = AddUserWithIdentityInput {
+        email: "delete@example.com".into(),
+        display_name: "Delete".into(),
+        provider_id: "entra".into(),
+        issuer: "https://issuer.example".into(),
+        subject: "tenant:object".into(),
+        subject_strategy: "entra_oid_tid".into(),
+    };
+    let (user, identity) = store.add_user_with_identity(input.clone()).await.unwrap();
+    let other = store
+        .add_user(AddUserInput {
+            email: "other@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store.add_group("team", "").await.unwrap();
+    store.add_group_member("team", &user.id).await.unwrap();
+    store.add_group_member("team", &other.id).await.unwrap();
+    store
+        .upsert(Resource {
+            name: "repo".into(),
+            lore_repository_id: "repo".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &user.id, "repo", "reader")
+        .await
+        .unwrap();
+    store
+        .add_grant("user", &other.id, "repo", "reader")
+        .await
+        .unwrap();
+    let session = store
+        .create_browser_session(&user.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    store
+        .create_csrf_token(&session.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    IssuedTokenLog::record(
+        store,
+        IssuedToken {
+            jti: "deleted-user-token".into(),
+            kind: "authn".into(),
+            user_id: user.id.clone(),
+            kid: "key".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let conn = raw_connection(&fixture.path);
+    conn.execute(
+        "INSERT INTO identity_invitations (id, user_id, provider_id, issuer, binding_policy, status, accepted_identity_id, created_at) VALUES ('invite', ?1, 'entra', 'issuer', 'verified_email_invitation', 'accepted', ?2, 1)",
+        params![user.id, identity.id],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO auth_sessions (id, session_code_hash, client_state_hash, status, user_id, login_url_nonce, created_at, expires_at) VALUES ('auth', 'hash', 'state', 'completed', ?1, 'nonce', 1, 2)",
+        params![user.id],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO device_authorizations (id, device_code_hash, user_code_hash, requested_remote_url, approved_user_id, status, created_at, expires_at) VALUES ('device', 'device-hash', 'user-hash', '', ?1, 'approved', 1, 2)",
+        params![user.id],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO audit_events (id, actor_user_id, action, created_at) VALUES ('event', ?1, 'test', 1)",
+        params![user.id],
+    ).unwrap();
+    let audited = store.audited("admin");
+    assert!(matches!(
+        audited.delete_disabled_user(&user.id).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    store.disable_user(&user.id).await.unwrap();
+    install_admin_audit_failure_trigger(&fixture);
+    assert!(matches!(
+        audited.delete_disabled_user(&user.id).await,
+        Err(CoreError::AdminAuditFailed(_))
+    ));
+    assert!(store.user_by_id(&user.id).await.is_ok());
+    assert_eq!(store.list_grants("repo").await.unwrap().len(), 2);
+    conn.execute_batch("DROP TRIGGER fail_admin_audit").unwrap();
+
+    audited.delete_disabled_user(&user.id).await.unwrap();
+    assert!(matches!(
+        store.user_by_id(&user.id).await,
+        Err(CoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.user_by_browser_session(&session.id).await,
+        Err(CoreError::NotFound)
+    ));
+    assert_eq!(store.list_grants("repo").await.unwrap().len(), 1);
+    assert_eq!(store.list_group_members("team").await.unwrap().len(), 1);
+    for table in [
+        "external_identities",
+        "identity_invitations",
+        "auth_sessions",
+        "device_authorizations",
+        "issued_tokens",
+        "sessions",
+        "csrf_tokens",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    let actor: Option<String> = conn
+        .query_row(
+            "SELECT actor_user_id FROM audit_events WHERE id = 'event'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(actor.is_none());
+    assert!(
+        store
+            .list_admin_audit()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.action == "user.delete" && entry.object_id == user.id)
+    );
+    let (new_user, _) = store.add_user_with_identity(input).await.unwrap();
+    assert_ne!(new_user.id, user.id);
+}
+
+#[tokio::test]
+async fn disabled_service_account_can_be_deleted_and_client_id_reused() {
+    let fixture = migrated_store().await;
+    let store = &fixture.store;
+    let input = lore_auth_core::model::CreateServiceAccountInput {
+        client_id: "automation".into(),
+        display_name: "Automation".into(),
+    };
+    let account = store.create_service_account(input.clone()).await.unwrap();
+    store.disable_user(&account.account.user.id).await.unwrap();
+    store
+        .audited("admin")
+        .delete_disabled_user(&account.account.user.id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authenticate_service_account("automation", &account.client_secret)
+            .await
+            .is_err()
+    );
+    let replacement = store.create_service_account(input).await.unwrap();
+    assert_ne!(replacement.account.user.id, account.account.user.id);
+}
+
+#[tokio::test]
 async fn sqlite_admin_read_ports_list_users_and_group_edges() {
     let fixture = migrated_store().await;
     let store = &fixture.store;

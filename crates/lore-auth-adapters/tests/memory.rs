@@ -40,6 +40,52 @@ fn memory_store_implements_core_test_double_ports() {
 }
 
 #[tokio::test]
+async fn deleted_service_account_loses_access_and_can_be_recreated() {
+    let store = Store::new();
+    let group = store.add_group("ci", "").await.unwrap();
+    let input = lore_auth_core::model::CreateServiceAccountInput {
+        client_id: "runner".into(),
+        display_name: "Runner".into(),
+    };
+    let account = store.create_service_account(input.clone()).await.unwrap();
+    store
+        .add_group_member(&group.id, &account.account.user.id)
+        .await
+        .unwrap();
+    let audited = store.audited("admin");
+    assert!(matches!(
+        audited.delete_disabled_user(&account.account.user.id).await,
+        Err(CoreError::InvalidArgument(_))
+    ));
+    store.disable_user(&account.account.user.id).await.unwrap();
+    audited
+        .delete_disabled_user(&account.account.user.id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .list_group_members(&group.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .authenticate_service_account("runner", &account.client_secret)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .admin_audit_entries()
+            .iter()
+            .any(|entry| entry.action == "user.delete")
+    );
+    let replacement = store.create_service_account(input).await.unwrap();
+    assert_ne!(replacement.account.user.id, account.account.user.id);
+}
+
+#[tokio::test]
 async fn audited_memory_service_account_creation_joins_group_without_logging_secret() {
     let store = Store::new();
     let group = store.add_group("ci", "").await.unwrap();

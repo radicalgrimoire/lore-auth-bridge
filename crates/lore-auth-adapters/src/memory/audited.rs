@@ -721,6 +721,76 @@ impl AccountDirectory for AuditedStore {
         ));
         Ok(())
     }
+
+    async fn delete_disabled_user(&self, user_id: &str) -> Result<(), CoreError> {
+        let mut state = self.inner.lock();
+        let user = state.users.get(user_id).ok_or(CoreError::NotFound)?;
+        if user.status != "disabled" {
+            return Err(CoreError::InvalidArgument(
+                "user must be disabled before deletion".into(),
+            ));
+        }
+        let email = user.email.clone();
+        state.users.remove(user_id);
+        state
+            .identities
+            .retain(|_, identity| identity.user_id != user_id);
+        state
+            .invitations
+            .retain(|_, invitation| invitation.user_id != user_id);
+        state.service_accounts.remove(user_id);
+        state
+            .grants
+            .remove(&("user".to_owned(), user_id.to_owned()));
+        for members in state.group_members.values_mut() {
+            members.retain(|id| id != user_id);
+        }
+        let session_ids: std::collections::HashSet<_> = state
+            .auth_sessions
+            .iter()
+            .filter_map(|(id, session)| (session.user_id == user_id).then_some(id.clone()))
+            .collect();
+        state
+            .auth_sessions
+            .retain(|_, session| session.user_id != user_id);
+        state
+            .auth_session_codes
+            .retain(|_, id| !session_ids.contains(id));
+        let browser_ids: std::collections::HashSet<_> = state
+            .browser_sessions
+            .iter()
+            .filter_map(|(id, owner)| (owner == user_id).then_some(id.clone()))
+            .collect();
+        state.browser_sessions.retain(|_, owner| owner != user_id);
+        state
+            .csrf_tokens
+            .retain(|_, token| !browser_ids.contains(&token.session_id));
+        let device_ids: std::collections::HashSet<_> = state
+            .device_authorizations
+            .iter()
+            .filter_map(|(id, device)| (device.approved_user_id == user_id).then_some(id.clone()))
+            .collect();
+        state
+            .device_authorizations
+            .retain(|_, device| device.approved_user_id != user_id);
+        state
+            .device_code_index
+            .retain(|_, id| !device_ids.contains(id));
+        state
+            .user_code_index
+            .retain(|_, id| !device_ids.contains(id));
+        state
+            .issued_tokens
+            .retain(|_, token| token.user_id != user_id);
+        state.admin_audit.push(admin_audit_entry(
+            &self.actor,
+            "user.delete",
+            "user",
+            user_id,
+            format!("email={email}"),
+        ));
+        Ok(())
+    }
 }
 
 #[async_trait]
