@@ -4,10 +4,12 @@
 <section>
   <h1>{{ self.t("admin.users.title") }}</h1>
   <form method="get" action="/admin/users" hx-get="/admin/users" hx-target="#users-results" hx-push-url="true">
-    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}' aria-label='{{ self.t("admin.search.label") }}'>
+    <label for="users-search">{{ self.t("admin.search.label") }}</label>
+    <input id="users-search" type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}'>
     <button type="submit">{{ self.t("admin.search.submit") }}</button>
   </form>
 </section>
+{% include "admin/users_table.html" %}
 {% if !entra_providers.is_empty() %}
 <section>
   <h2>{{ self.t("admin.users.add_entra") }}</h2>
@@ -17,15 +19,19 @@
     {% if entra_providers.len() == 1 %}
     <input type="hidden" name="provider_id" value="{{ entra_providers[0].id }}">
     {% else %}
-    <select name="provider_id" aria-label='{{ self.t("admin.users.provider_id") }}' required>
+    <label for="entra-provider">{{ self.t("admin.users.provider_id") }}</label>
+    <select id="entra-provider" name="provider_id" required>
       {% for provider in entra_providers %}
       <option value="{{ provider.id }}">{{ provider.display_name }} ({{ provider.id }})</option>
       {% endfor %}
     </select>
     {% endif %}
-    <input type="email" name="email" required placeholder='{{ self.t("admin.users.email") }}' aria-label='{{ self.t("admin.users.email") }}'>
-    <input type="text" name="display_name" placeholder='{{ self.t("admin.users.display_name") }}' aria-label='{{ self.t("admin.users.display_name") }}'>
-    <input type="text" name="object_id" required autocomplete="off" spellcheck="false" placeholder='{{ self.t("admin.users.object_id") }}' aria-label='{{ self.t("admin.users.object_id") }}'>
+    <label for="entra-email">{{ self.t("admin.users.email") }}</label>
+    <input id="entra-email" type="email" name="email" required placeholder='{{ self.t("admin.users.email") }}'>
+    <label for="entra-display-name">{{ self.t("admin.users.display_name") }}</label>
+    <input id="entra-display-name" type="text" name="display_name" placeholder='{{ self.t("admin.users.display_name") }}'>
+    <label for="entra-object-id">{{ self.t("admin.users.object_id") }}</label>
+    <input id="entra-object-id" type="text" name="object_id" required autocomplete="off" spellcheck="false" placeholder='{{ self.t("admin.users.object_id") }}'>
     <button type="submit">{{ self.t("admin.users.add") }}</button>
   </form>
 </section>
@@ -36,11 +42,12 @@
     <p>{{ self.t("admin.users.add_warning") }}</p>
     <form method="post" action="/admin/users">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="email" name="email" placeholder='{{ self.t("admin.users.email") }}' aria-label='{{ self.t("admin.users.email") }}'>
-      <input type="text" name="display_name" placeholder='{{ self.t("admin.users.display_name") }}' aria-label='{{ self.t("admin.users.display_name") }}'>
+      <label for="advanced-email">{{ self.t("admin.users.email") }}</label>
+      <input id="advanced-email" type="email" name="email" placeholder='{{ self.t("admin.users.email") }}'>
+      <label for="advanced-display-name">{{ self.t("admin.users.display_name") }}</label>
+      <input id="advanced-display-name" type="text" name="display_name" placeholder='{{ self.t("admin.users.display_name") }}'>
       <button class="secondary" type="submit">{{ self.t("admin.common.add") }}</button>
     </form>
   </details>
 </section>
-{% include "admin/users_table.html" %}
 {% endblock %}

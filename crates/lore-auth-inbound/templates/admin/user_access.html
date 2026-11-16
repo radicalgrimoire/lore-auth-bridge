@@ -47,8 +47,9 @@
   {% if repositories.is_empty() %}
   <p>{{ self.t("admin.repositories.empty") }}</p>
   {% else %}
-  <form method="post" action="/admin/users/{{ user.id_path }}/access">
+  <form class="table-form" method="post" action="/admin/users/{{ user.id_path }}/access">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="table-scroll" role="region" aria-label='{{ self.t("admin.user_access.add_repositories") }}' tabindex="0">
   <table>
     <thead>
       <tr>
@@ -79,6 +80,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
     <button type="submit">{{ self.t("admin.user_access.save_repositories") }}</button>
   </form>
   {% endif %}

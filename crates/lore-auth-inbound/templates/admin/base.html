@@ -6,10 +6,12 @@
   <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
   <title>{% block title %}{{ self.t("admin.app.title") }}{% endblock %}</title>
   <link rel="stylesheet" href="/admin/static/pico.min.css">
+  <link rel="stylesheet" href="/admin/static/admin.css">
   <script src="/admin/static/htmx.min.js" defer></script>
 </head>
 <body hx-boost="true">
-  <header class="container">
+  <header class="site-header">
+    <div class="container">
     <nav>
       <ul>
         <li><a href="/admin"{% if active == "dashboard" %} aria-current="page"{% endif %}><strong>{{ self.t("admin.app.title") }}</strong></a></li>
@@ -21,8 +23,9 @@
         <li><a href="/admin/server-settings"{% if active == "server-settings" %} aria-current="page"{% else if active == "simulator" %} aria-current="true"{% endif %}>{{ self.t("admin.nav.server_settings") }}</a></li>
       </ul>
     </nav>
+    </div>
   </header>
-  <main class="container">
+  <main class="container admin-main">
     {% if !flash.is_empty() %}
     <section aria-live="polite" class="flash">{{ flash }}</section>
     {% endif %}

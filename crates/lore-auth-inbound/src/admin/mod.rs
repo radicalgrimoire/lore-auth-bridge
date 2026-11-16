@@ -48,7 +48,7 @@ use server_settings::{
     handle_maintenance_update, handle_server_settings, handle_service_account_add,
 };
 use simulator::{handle_simulator, handle_simulator_check};
-use static_assets::{handle_htmx, handle_pico};
+use static_assets::{handle_admin_css, handle_htmx, handle_pico};
 use users::{
     handle_user_access, handle_user_add, handle_user_add_entra, handle_user_add_repositories,
     handle_user_disable, handle_user_update_display_name, handle_user_update_entra_identity,
@@ -181,6 +181,7 @@ pub(crate) fn routes() -> Router<AppState> {
         )
         .route("/admin/static/htmx.min.js", get(handle_htmx))
         .route("/admin/static/pico.min.css", get(handle_pico))
+        .route("/admin/static/admin.css", get(handle_admin_css))
 }
 
 pub(super) fn normalized_query(value: Option<&str>) -> String {

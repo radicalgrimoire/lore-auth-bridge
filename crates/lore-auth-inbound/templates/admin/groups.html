@@ -4,23 +4,16 @@
 <section>
   <h1>{{ self.t("admin.groups.title") }}</h1>
   <form method="get" action="/admin/groups">
-    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}' aria-label='{{ self.t("admin.search.label") }}'>
+    <label for="groups-search">{{ self.t("admin.search.label") }}</label>
+    <input id="groups-search" type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}'>
     <button type="submit">{{ self.t("admin.search.submit") }}</button>
-  </form>
-</section>
-<section>
-  <h2>{{ self.t("admin.groups.add") }}</h2>
-  <form method="post" action="/admin/groups">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="name" placeholder='{{ self.t("admin.groups.group") }}' aria-label='{{ self.t("admin.groups.group") }}'>
-    <input type="text" name="description" placeholder='{{ self.t("admin.groups.description") }}' aria-label='{{ self.t("admin.groups.description") }}'>
-    <button type="submit">{{ self.t("admin.common.add") }}</button>
   </form>
 </section>
 <section>
   {% if rows.is_empty() %}
   <p>{{ self.t("admin.groups.empty") }}</p>
   {% else %}
+  <div class="table-scroll" role="region" aria-label='{{ self.t("admin.groups.title") }}' tabindex="0">
   <table>
     <thead><tr>
       <th scope="col">{{ self.t("admin.groups.name") }}</th>
@@ -39,6 +32,18 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
+</section>
+<section>
+  <h2>{{ self.t("admin.groups.add") }}</h2>
+  <form method="post" action="/admin/groups">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="group-name">{{ self.t("admin.groups.group") }}</label>
+    <input id="group-name" type="text" name="name" placeholder='{{ self.t("admin.groups.group") }}'>
+    <label for="group-description">{{ self.t("admin.groups.description") }}</label>
+    <input id="group-description" type="text" name="description" placeholder='{{ self.t("admin.groups.description") }}'>
+    <button type="submit">{{ self.t("admin.common.add") }}</button>
+  </form>
 </section>
 {% endblock %}

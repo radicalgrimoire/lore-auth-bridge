@@ -16,6 +16,7 @@ use super::guard::require_admin;
 
 const HTMX_JS: &[u8] = include_bytes!("static/htmx.min.js");
 const PICO_CSS: &[u8] = include_bytes!("static/pico.min.css");
+const ADMIN_CSS: &[u8] = include_bytes!("static/admin.css");
 
 pub(super) async fn handle_htmx(
     State(state): State<AppState>,
@@ -39,6 +40,17 @@ pub(super) async fn handle_pico(
 ) -> Response {
     match require_admin(&state, &headers, peer).await {
         Ok(_) => bytes_response(StatusCode::OK, PICO_CSS, "text/css; charset=utf-8"),
+        Err(response) => response,
+    }
+}
+
+pub(super) async fn handle_admin_css(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> Response {
+    match require_admin(&state, &headers, peer).await {
+        Ok(_) => bytes_response(StatusCode::OK, ADMIN_CSS, "text/css; charset=utf-8"),
         Err(response) => response,
     }
 }

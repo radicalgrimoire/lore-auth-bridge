@@ -5,6 +5,7 @@
   {% if rows.is_empty() %}
   <p>{{ self.t("admin.users.empty") }}</p>
   {% else %}
+  <div class="table-scroll" role="region" aria-label='{{ self.t("admin.users.title") }}' tabindex="0">
   <table>
     <thead>
       <tr>
@@ -28,7 +29,7 @@
           {% if user.id != current_user_id %}
           <form method="post" action="/admin/users/{{ user.id_path }}/disable" hx-confirm='{{ self.t("admin.common.confirm") }}'>
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit">{{ self.t("admin.common.disable") }}</button>
+            <button class="danger" type="submit">{{ self.t("admin.common.disable") }}</button>
           </form>
           {% endif %}
         </td>
@@ -36,5 +37,6 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </section>

@@ -850,6 +850,7 @@ async fn admin_route_renders_english_dashboard_even_with_old_language_settings()
         body.contains(r#"<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>"#),
         "{body}"
     );
+    assert!(body.contains(r#"href="/admin/static/admin.css""#), "{body}");
     assert!(body.contains("Admin@Example.com"), "{body}");
     assert!(body.contains("Admin &#60;Root&#62; &#38; Co"), "{body}");
     assert!(!body.contains("&amp;#60;Root&amp;#62;"), "{body}");
@@ -868,16 +869,14 @@ async fn admin_static_assets_share_admin_guard_and_content_types() {
         .await
         .expect("session creates");
 
-    let unauthenticated = app
-        .clone()
-        .oneshot(peer_request(
-            "/admin/static/htmx.min.js",
-            None,
-            [127, 0, 0, 1],
-        ))
-        .await
-        .expect("static response");
-    assert_eq!(unauthenticated.status(), StatusCode::NOT_FOUND);
+    for path in ["/admin/static/htmx.min.js", "/admin/static/admin.css"] {
+        let unauthenticated = app
+            .clone()
+            .oneshot(peer_request(path, None, [127, 0, 0, 1]))
+            .await
+            .expect("static response");
+        assert_eq!(unauthenticated.status(), StatusCode::NOT_FOUND);
+    }
 
     let htmx = app
         .clone()
@@ -895,6 +894,7 @@ async fn admin_static_assets_share_admin_guard_and_content_types() {
     );
 
     let pico = app
+        .clone()
         .oneshot(peer_request(
             "/admin/static/pico.min.css",
             Some(format!("{SESSION_COOKIE_NAME}={}", session.id)),
@@ -907,6 +907,21 @@ async fn admin_static_assets_share_admin_guard_and_content_types() {
         pico.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/css; charset=utf-8"
     );
+
+    let admin_css = app
+        .oneshot(peer_request(
+            "/admin/static/admin.css",
+            Some(format!("{SESSION_COOKIE_NAME}={}", session.id)),
+            [127, 0, 0, 1],
+        ))
+        .await
+        .expect("admin css response");
+    assert_eq!(admin_css.status(), StatusCode::OK);
+    assert_eq!(
+        admin_css.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/css; charset=utf-8"
+    );
+    assert!(response_text(admin_css).await.contains(".table-scroll"));
 }
 
 #[tokio::test]

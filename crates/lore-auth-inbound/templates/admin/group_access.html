@@ -9,7 +9,8 @@
 <section>
   <h2>{{ self.t("admin.groups.search_title") }}</h2>
   <form method="get" action="/admin/groups/{{ group.id_path }}/access">
-    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.groups.search_members") }}' aria-label='{{ self.t("admin.groups.search_members") }}'>
+    <label for="members-search">{{ self.t("admin.groups.search_members") }}</label>
+    <input id="members-search" type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.groups.search_members") }}'>
     <button type="submit">{{ self.t("admin.search.submit") }}</button>
   </form>
 </section>
@@ -17,7 +18,8 @@
   <h2>{{ self.t("admin.groups.member_add") }}</h2>
   <form method="post" action="/admin/groups/{{ group.id_path }}/members/add">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="user" required placeholder='{{ self.t("admin.groups.user") }}' aria-label='{{ self.t("admin.groups.user") }}'>
+    <label for="member-user">{{ self.t("admin.groups.user") }}</label>
+    <input id="member-user" type="text" name="user" required placeholder='{{ self.t("admin.groups.user") }}'>
     <button type="submit">{{ self.t("admin.common.add") }}</button>
   </form>
 </section>
@@ -26,6 +28,7 @@
   {% if members.is_empty() %}
   {% if query.is_empty() %}<p>{{ self.t("admin.groups.no_members") }}</p>{% else %}<p>{{ self.t("admin.groups.no_matching_members") }}</p>{% endif %}
   {% else %}
+  <div class="table-scroll" role="region" aria-label='{{ self.t("admin.groups.members") }}' tabindex="0">
   <table>
     <thead><tr>
       <th scope="col">{{ self.t("admin.users.email") }}</th>
@@ -46,12 +49,13 @@
         <td><form method="post" action="/admin/groups/{{ group.id_path }}/members/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="user" value="{{ member.id }}">
-          <button type="submit">{{ self.t("admin.common.remove") }}</button>
+          <button class="danger" type="submit">{{ self.t("admin.common.remove") }}</button>
         </form></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </section>
 <section>
@@ -73,7 +77,7 @@
       <form method="post" action="/admin/groups/{{ group.id_path }}/cidrs/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="cidr" value="{{ cidr }}">
-        <button type="submit">{{ self.t("admin.common.remove") }}</button>
+        <button class="danger" type="submit">{{ self.t("admin.common.remove") }}</button>
       </form>
     </li>
     {% endfor %}
@@ -89,7 +93,7 @@
       <form method="post" action="/admin/groups/{{ group.id_path }}/nests/remove" hx-confirm='{{ self.t("admin.common.confirm") }}'>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="member_group" value="{{ nested.id }}">
-        <button type="submit">{{ self.t("admin.common.remove") }}</button>
+        <button class="danger" type="submit">{{ self.t("admin.common.remove") }}</button>
       </form>
     </li>
     {% endfor %}

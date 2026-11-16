@@ -4,19 +4,22 @@
 <section>
   <h1>{{ self.t("admin.repositories.title") }}</h1>
   <form method="get" action="/admin/repositories" hx-get="/admin/repositories" hx-target="#repositories-results" hx-push-url="true">
-    <input type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}' aria-label='{{ self.t("admin.search.label") }}'>
+    <label for="repositories-search">{{ self.t("admin.search.label") }}</label>
+    <input id="repositories-search" type="search" name="q" value="{{ query }}" placeholder='{{ self.t("admin.search.placeholder") }}'>
     <button type="submit">{{ self.t("admin.search.submit") }}</button>
   </form>
 </section>
+{% include "admin/repositories_table.html" %}
 <section>
   <h2>{{ self.t("admin.repositories.create") }}</h2>
   <p>{{ self.t("admin.repositories.create_description") }}</p>
   <form method="post" action="/admin/repositories">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="text" name="organization" placeholder='{{ self.t("admin.repositories.organization") }}' aria-label='{{ self.t("admin.repositories.organization") }}'>
-    <input type="text" name="name" placeholder='{{ self.t("admin.repositories.name") }}' aria-label='{{ self.t("admin.repositories.name") }}' required>
+    <label for="repository-organization">{{ self.t("admin.repositories.organization") }}</label>
+    <input id="repository-organization" type="text" name="organization" placeholder='{{ self.t("admin.repositories.organization") }}'>
+    <label for="repository-name">{{ self.t("admin.repositories.name") }}</label>
+    <input id="repository-name" type="text" name="name" placeholder='{{ self.t("admin.repositories.name") }}' required>
     <button type="submit">{{ self.t("admin.common.add") }}</button>
   </form>
 </section>
-{% include "admin/repositories_table.html" %}
 {% endblock %}

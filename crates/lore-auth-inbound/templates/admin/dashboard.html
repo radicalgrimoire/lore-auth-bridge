@@ -6,7 +6,7 @@
   <p>{{ self.t("admin.dashboard.signed_in") }}: <strong>{{ user_email }}</strong></p>
   <p>{{ self.t("admin.dashboard.display_name") }}: {{ user_display }}</p>
 </section>
-<nav aria-label='{{ self.t("admin.nav.label") }}'>
+<nav class="dashboard-links" aria-label='{{ self.t("admin.nav.label") }}'>
   <ul>
     <li><a href="/admin/repositories">{{ self.t("admin.nav.repositories") }}</a></li>
     <li><a href="/admin/users">{{ self.t("admin.nav.users") }}</a></li>
