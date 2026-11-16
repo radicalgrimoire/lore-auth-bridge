@@ -95,8 +95,14 @@
   </form>
 </section>
 {% else if user.id != current_user_id && user.status == "disabled" %}
-<section>
+<section class="user-actions">
   <h2 id="manage-user">{{ self.t("admin.user_access.manage_user") }}</h2>
+  <p>{{ self.t("admin.user_access.enable_help") }}</p>
+  <form method="post" action="/admin/users/{{ user.id_path }}/enable" aria-labelledby="manage-user" hx-confirm='{{ self.t("admin.user_access.enable_confirm") }}'>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">{{ self.t("admin.user_access.enable") }}</button>
+  </form>
+  <p>{{ self.t("admin.user_delete.help") }}</p>
   <form method="get" action="/admin/users/{{ user.id_path }}/delete" aria-labelledby="manage-user" hx-boost="false">
     <button class="danger" type="submit">{{ self.t("admin.user_delete.title") }}</button>
   </form>

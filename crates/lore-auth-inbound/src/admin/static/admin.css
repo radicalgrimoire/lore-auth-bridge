@@ -113,6 +113,10 @@ body {
   max-inline-size: none;
 }
 
+.admin-main .user-actions form + p {
+  margin-block-start: 1rem;
+}
+
 .admin-main label {
   font-weight: 600;
 }

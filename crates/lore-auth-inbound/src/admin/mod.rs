@@ -51,7 +51,7 @@ use simulator::{handle_simulator, handle_simulator_check};
 use static_assets::{handle_admin_css, handle_htmx, handle_pico};
 use users::{
     handle_user_access, handle_user_add, handle_user_add_entra, handle_user_add_repositories,
-    handle_user_delete, handle_user_delete_confirmation, handle_user_disable,
+    handle_user_delete, handle_user_delete_confirmation, handle_user_disable, handle_user_enable,
     handle_user_update_display_name, handle_user_update_entra_identity, handle_users,
 };
 
@@ -132,6 +132,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/admin/users", post(handle_user_add))
         .route("/admin/users/entra", post(handle_user_add_entra))
         .route("/admin/users/:id/disable", post(handle_user_disable))
+        .route("/admin/users/:id/enable", post(handle_user_enable))
         .route(
             "/admin/users/:id/delete",
             get(handle_user_delete_confirmation).post(handle_user_delete),

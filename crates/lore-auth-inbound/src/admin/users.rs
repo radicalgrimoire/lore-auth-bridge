@@ -575,6 +575,48 @@ pub(super) async fn handle_user_disable(
     render_user_access(&state, &session, &id, &flash).await
 }
 
+pub(super) async fn handle_user_enable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let session = match require_admin(&state, &headers, peer).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_admin_csrf(&state, &session, &form.csrf_token).await {
+        return response;
+    }
+    let target = match state.services.accounts.user_by_id(&id).await {
+        Ok(user) => user,
+        Err(CoreError::NotFound) => return not_found(),
+        Err(_) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "users unavailable"),
+    };
+    if target.status != "disabled" {
+        let flash = format!(
+            "{}: {}",
+            translate("admin.flash.error"),
+            translate("admin.user_access.enable_disabled_only")
+        );
+        return render_user_access(&state, &session, &id, &flash).await;
+    }
+    let result = state
+        .services
+        .admin_writes
+        .for_actor(&admin_actor(&session))
+        .accounts
+        .enable_user(&id)
+        .await;
+    let flash = match result {
+        Ok(()) => translate("admin.user_access.enabled"),
+        Err(CoreError::NotFound) => return not_found(),
+        Err(err) => format!("{}: {err}", translate("admin.flash.error")),
+    };
+    render_user_access(&state, &session, &id, &flash).await
+}
+
 pub(super) async fn handle_user_delete_confirmation(
     State(state): State<AppState>,
     Path(id): Path<String>,

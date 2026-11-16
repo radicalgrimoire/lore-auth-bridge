@@ -2698,6 +2698,183 @@ async fn admin_user_disable_is_available_on_access_page_and_reports_result() {
 }
 
 #[tokio::test]
+async fn admin_can_reenable_disabled_user_with_existing_access() {
+    let fixture = new_sqlite_admin_app().await;
+    let access = format!("/admin/users/{}/access", fixture.user_id);
+    let disable = format!("/admin/users/{}/disable", fixture.user_id);
+    let enable = format!("/admin/users/{}/enable", fixture.user_id);
+    fixture.store.add_group("team", "").await.unwrap();
+    fixture
+        .store
+        .add_group_member("team", &fixture.user_id)
+        .await
+        .unwrap();
+    let identity = fixture
+        .store
+        .audited("test-admin")
+        .bind_external_identity(ExternalIdentity {
+            email: "alice@example.com".into(),
+            provider_id: "entra".into(),
+            issuer: "https://issuer.example".into(),
+            subject: "tenant:object".into(),
+            subject_strategy: "entra_oid_tid".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let page = fixture
+        .app
+        .clone()
+        .oneshot(peer_request(
+            &access,
+            Some(fixture.admin_cookie.clone()),
+            [127, 0, 0, 1],
+        ))
+        .await
+        .unwrap();
+    assert!(!response_text(page).await.contains(&enable));
+    let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &access).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &disable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains(&format!("action=\"{enable}\"")), "{body}");
+    assert!(body.contains("hx-confirm="), "{body}");
+    assert!(
+        fixture
+            .store
+            .principal_by_user_id(&fixture.user_id)
+            .await
+            .is_err()
+    );
+
+    let unauth = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(&enable, None, ""))
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), StatusCode::NOT_FOUND);
+    let invalid = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &enable,
+            Some(fixture.admin_cookie.clone()),
+            "csrf_token=invalid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::FORBIDDEN);
+
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &enable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_text(response).await;
+    assert!(body.contains("alice@example.com (active)"), "{body}");
+    assert!(body.contains("User re-enabled."), "{body}");
+    assert!(!body.contains(&format!("action=\"{enable}\"")), "{body}");
+    assert!(
+        fixture
+            .store
+            .principal_by_user_id(&fixture.user_id)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        fixture.store.list_group_members("team").await.unwrap()[0].id,
+        fixture.user_id
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_grants("game-assets")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store
+            .external_identities_for_user(&fixture.user_id)
+            .await
+            .unwrap()[0]
+            .id,
+        identity.id
+    );
+    let entries = fixture.store.list_admin_audit().await.unwrap();
+    assert_eq!(audit_action_counts(&entries).get("user.enable"), Some(&1));
+
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &enable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("Only disabled users can be re-enabled")
+    );
+    let entries = fixture.store.list_admin_audit().await.unwrap();
+    assert_eq!(audit_action_counts(&entries).get("user.enable"), Some(&1));
+
+    let (pending, _) = fixture
+        .store
+        .add_invitation(model::AddInvitationInput {
+            provider_id: "entra".into(),
+            issuer: "https://issuer.example".into(),
+            email: "pending@example.com".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &access).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &format!("/admin/users/{}/enable", pending.id),
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response_text(response)
+            .await
+            .contains("Only disabled users can be re-enabled")
+    );
+    assert_eq!(
+        fixture.store.user_by_id(&pending.id).await.unwrap().status,
+        "pending"
+    );
+}
+
+#[tokio::test]
 async fn admin_user_delete_requires_disabled_account_and_confirmation() {
     let fixture = new_sqlite_admin_app().await;
     let access_path = format!("/admin/users/{}/access", fixture.user_id);
@@ -2853,7 +3030,7 @@ async fn admin_user_delete_requires_disabled_account_and_confirmation() {
 }
 
 #[tokio::test]
-async fn admin_can_delete_disabled_service_account() {
+async fn admin_can_reenable_and_delete_disabled_service_account() {
     let fixture = new_sqlite_admin_app().await;
     let account = fixture
         .store
@@ -2866,6 +3043,7 @@ async fn admin_can_delete_disabled_service_account() {
     let id = &account.account.user.id;
     let access = format!("/admin/users/{id}/access");
     let disable = format!("/admin/users/{id}/disable");
+    let enable = format!("/admin/users/{id}/enable");
     let delete = format!("/admin/users/{id}/delete");
     let csrf = admin_csrf(fixture.app.clone(), &fixture.admin_cookie, &access).await;
     let response = fixture
@@ -2880,6 +3058,47 @@ async fn admin_can_delete_disabled_service_account() {
         .unwrap();
     let body = response_text(response).await;
     assert!(body.contains(&delete), "{body}");
+    assert!(body.contains(&enable), "{body}");
+    assert!(
+        fixture
+            .store
+            .authenticate_service_account("runner", &account.client_secret)
+            .await
+            .is_err()
+    );
+    let csrf = extract_csrf(&body);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &enable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
+    let body = response_text(response).await;
+    assert!(body.contains("Runner (active)"), "{body}");
+    assert_eq!(
+        fixture
+            .store
+            .authenticate_service_account("runner", &account.client_secret)
+            .await
+            .unwrap()
+            .id,
+        *id
+    );
+    let csrf = extract_csrf(&body);
+    fixture
+        .app
+        .clone()
+        .oneshot(post_form_request(
+            &disable,
+            Some(fixture.admin_cookie.clone()),
+            &format!("csrf_token={csrf}"),
+        ))
+        .await
+        .unwrap();
     let response = fixture
         .app
         .clone()
