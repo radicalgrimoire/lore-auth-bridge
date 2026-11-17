@@ -21,7 +21,7 @@ use super::{
         append_header, html_escape, html_response, redirect_found, response_with_headers,
         string_or, text_response,
     },
-    session::{clear_cookie, current_user, is_secure, render_whoami, session_cookie},
+    session::{clear_cookie, current_user, is_secure, session_cookie},
 };
 
 pub(super) async fn handle_healthz() -> Response {
@@ -276,7 +276,10 @@ pub(super) async fn handle_auth_callback(
         Err(_) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "login unavailable"),
     };
     if result.unknown_user {
-        return render_whoami(result.identity);
+        return html_response(
+            StatusCode::OK,
+            "<h1>Account not registered</h1><p>Contact the administrator. No Lore token was issued.</p>",
+        );
     }
     if result.cli_complete {
         return response_with_headers(

@@ -26,7 +26,7 @@ bridge は IdP から返された external identity を、既存の binding ま�
 
 登録済みユーザーならブラウザセッションまたは CLI auth session が完了します。
 
-未登録ユーザーなら token は発行されず、whoami 画面に identity が表示されます。
+未登録ユーザーなら token は発行されず、管理者への連絡を促す画面が表示されます。identity は表示されません。
 
 IdP が確認済み email を返す場合、管理者は `lore-authctl --config <cfg> user invite --idp <provider-id> --email <address>` でユーザーを事前登録できます。
 

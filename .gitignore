@@ -4,6 +4,7 @@
 /lore/
 /.manual/
 /.probe/
+*.code-workspace
 .env
 .env.*
 *.pem

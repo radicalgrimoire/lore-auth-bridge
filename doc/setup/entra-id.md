@@ -249,7 +249,7 @@ active な binding があれば、ブラウザセッションまたは CLI auth 
 
 active な binding がない場合は、[Configuration](configuration.md#identity_providers) の generic invitation-binding policy が適用されます。
 
-binding または invitation と照合できない場合は token を発行せず、whoami 画面を表示します。
+binding または invitation と照合できない場合は token を発行せず、identity を表示せずに管理者への連絡を促します。
 
 ## よくある失敗
 

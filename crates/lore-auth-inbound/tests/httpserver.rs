@@ -175,6 +175,74 @@ async fn auth_callback_sets_hardened_session_cookie() {
 }
 
 #[tokio::test]
+async fn unregistered_auth_callback_does_not_disclose_identity() {
+    let (app, store, _) = new_test_app(fake_idp_with_identity(ExternalIdentity {
+        provider_id: "google".to_owned(),
+        issuer: "https://accounts.google.com".to_owned(),
+        subject: "tenant-id:object-id".to_owned(),
+        email: "alice@example.com".to_owned(),
+        email_verified: true,
+        display_name: "Alice Example".to_owned(),
+        hosted_domain: "example.com".to_owned(),
+        ..ExternalIdentity::default()
+    }));
+    let (_, auth_session) = store
+        .create_auth_session("client-state", Duration::from_secs(60))
+        .await
+        .expect("auth session creates");
+    let (state, _) = store
+        .create_login_state(
+            model::LoginStateInput {
+                provider_id: "google".to_owned(),
+                nonce: "nonce".to_owned(),
+                login_url_nonce: auth_session.login_url_nonce.clone(),
+                ..model::LoginStateInput::default()
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("login state creates");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/auth/google/callback?state={state}&code=static"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("callback response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let session = store
+        .get_auth_session_by_nonce(&auth_session.login_url_nonce)
+        .await
+        .expect("auth session remains");
+    assert_ne!(session.status, "completed");
+    assert!(session.user_id.is_empty());
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("response body");
+    let body = String::from_utf8(body.to_vec()).expect("UTF-8 response");
+    assert!(body.contains("Account not registered"));
+    assert!(body.contains("No Lore token was issued"));
+    for value in [
+        "tenant-id",
+        "object-id",
+        "accounts.google.com",
+        "alice@example.com",
+        "Alice Example",
+        "example.com",
+    ] {
+        assert!(
+            !body.contains(value),
+            "identity exposed in response: {value}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn logout_requires_same_origin_and_single_use_csrf() {
     let (app, store, _) = new_test_app(fake_idp());
     let user = add_alice(&store);
